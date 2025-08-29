@@ -12,7 +12,7 @@ Implementing a modular multimodal fusion system for visible/EO, radar, and therm
 - [x] Initialized main `__init__.py` with project metadata
 - [x] Started action log documentation
 
-### 2024-08-29 - Core Infrastructure and Sensor Modules
+### 2024-08-29 - Core Infrastructure and Major Components
 - [x] Implemented core types and contracts (common/types.py)
 - [x] Set up build configuration (pyproject.toml, requirements.txt)
 - [x] Implemented common utilities (utils.py, metrics.py, losses.py, calibration.py)
@@ -20,9 +20,11 @@ Implementing a modular multimodal fusion system for visible/EO, radar, and therm
 - [x] Implemented TRIDENT-I modules (i1_frag_cnn.py, i2_therm_att_v.py, i3_dual_vision.py)
 - [x] Implemented TRIDENT-R modules (r1_echo_net.py, r2_pulse_lstm.py, r3_radar_former.py)
 - [x] Implemented TRIDENT-T modules (t1_plume_net.py, t2_cooling_curve.py)
+- [x] Implemented fusion and guard systems (f1_late_svm.py, f2_cross_attention.py, f3_fuzzy_rules.py, s_spoof_shield.py)
+- [x] Started runtime system (config.py, graph.py)
 
 ### Next Steps
-- [ ] Implement fusion and guard systems (fusion_guard/)
-- [ ] Implement runtime system (runtime/)
+- [ ] Complete runtime system (trainer.py, evaluator.py, server.py)
 - [ ] Create CLI interface (cli.py)
+- [ ] Update README and final documentation
 - [ ] Final testing and validation
