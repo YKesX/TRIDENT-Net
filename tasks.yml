@@ -1,0 +1,232 @@
+version: 1
+name: trident-net
+python: ">=3.10"
+framework: pytorch
+
+paths:
+  data_root: ./data
+  runs_root: ./runs
+  ckpt_root: ./checkpoints
+
+components:
+  i1:
+    class: trident_i.FragCNN
+    kind: segmentation
+    inputs: [rgb_roi: BxCxHxW]
+    outputs: [mask: Bx1xHxW, zi: Bx256, events: list]
+    loss: dice_focal
+    metrics: [miou, f1]
+    config: {backbone: efficientnet_b0, channels: 3, out_dim: 256}
+
+  i2:
+    class: trident_i.ThermAttentionV
+    kind: saliency
+    inputs: [rgb_roi_t: BxTxCxHxW]
+    outputs: [saliency: Bx1xHxW, zi: Bx256, events: list]
+    loss: bce
+    metrics: [auroc, ap]
+    config: {backbone: convnext_tiny, temporal: "1dconv", out_dim: 256}
+
+  i3:
+    class: trident_i.DualVisionNet
+    kind: change_detection
+    inputs: [rgb_pre: BxCxHxW, rgb_post: BxCxHxW]
+    outputs: [change_mask: Bx1xHxW, integrity_delta: Bx1, zi: Bx256, events: list]
+    loss: ce_iou
+    metrics: [miou, mae]
+    config: {encoder: efficientnet_b0, transformer_heads: 4, out_dim: 256}
+
+  r1:
+    class: trident_r.EchoNet
+    kind: cnn_1d
+    inputs: [rd_seq: BxTxFxR]
+    outputs: [zr: Bx256, events: list]
+    loss: ce
+    metrics: [auroc, f1]
+    config: {conv_blocks: 4, out_dim: 256}
+
+  r2:
+    class: trident_r.PulseLSTM
+    kind: bilstm
+    inputs: [pulse_feat: BxTxD]
+    outputs: [zr: Bx256, events: list]
+    loss: ce
+    metrics: [auroc]
+    config: {hidden: 256, layers: 2, bidirectional: true, out_dim: 256}
+
+  r3:
+    class: trident_r.RadarFormer
+    kind: transformer
+    inputs: [rd_tokens: BxTxD]
+    outputs: [zr: Bx256, events: list]
+    loss: ce
+    metrics: [auroc]
+    config: {d_model: 256, nhead: 8, nlayers: 6, out_dim: 256}
+
+  t1:
+    class: trident_t.PlumeNet
+    kind: detect_track
+    inputs: [ir_roi_t: BxTx1xHxW]
+    outputs: [tracks: list, zt: Bx256, events: list]
+    loss: giou_obj
+    metrics: [mAP50, mota]
+    config: {det_backbone: "lite", flow_head: "raft_lite", out_dim: 256}
+
+  t2:
+    class: trident_t.CoolingCurve
+    kind: temporal_classifier
+    inputs: [curve_seq: BxTxD]
+    outputs: [tau: Bx1, debris_vs_flare: Bx2, zt: Bx256, events: list]
+    loss: huber_ce
+    metrics: [mae, auroc]
+    config: {arch: gru, hidden: 128, layers: 2, out_dim: 256}
+
+  f1:
+    class: fusion_guard.LateFusionSVM
+    kind: classical_ml
+    inputs: [zr: Bx256, zi: Bx256, zt: Bx256]
+    outputs: [p_kill_aux: Bx1]
+    config: {kernel: rbf, gamma: scale, c: 1.0}
+
+  f2:
+    class: fusion_guard.CrossAttentionFusion
+    kind: transformer_fusion
+    inputs: [zr: Bx256, zi: Bx256, zt: Bx256, events: list]
+    outputs: [z_fused: Bx384, p_kill_logits: Bx1, attn_maps: dict]
+    loss: bce
+    metrics: [brier, auroc, ece]
+    config: {d_model: 384, nhead: 8, nlayers: 4, dropout: 0.1}
+
+  f3:
+    class: fusion_guard.FuzzyRuleOverlay
+    kind: rules
+    inputs: [events: list, p_kill_in: Bx1]
+    outputs: [p_kill_ruled: Bx1, rationale: str]
+    config: {ruleset_path: ./configs/rules_f3.yaml}
+
+  s:
+    class: fusion_guard.SpoofShield
+    kind: guard
+    inputs: [events: list, z_fused: Bx384, geom: dict, priors: dict]
+    outputs: [p_kill_masked: Bx1, spoof_risk: Bx1, gates: dict, explanation: dict]
+    config: {consistency_dt_ms: 80, min_rcs_drop_db: 7, tau_bounds: [0.05, 0.6]}
+
+datasets:
+  train:
+    type: multimodal
+    path: ${paths.data_root}/train
+  val:
+    type: multimodal
+    path: ${paths.data_root}/val
+  test:
+    type: multimodal
+    path: ${paths.data_root}/test
+
+tasks:
+  pretrain_i1:
+    run: train
+    component: i1
+    dataset: train
+    val: val
+    optimizer: {name: adamw, lr: 3e-4, wd: 0.05}
+    epochs: 50
+    save_to: ${paths.ckpt_root}/i1.pt
+
+  pretrain_i2:
+    run: train
+    component: i2
+    dataset: train
+    val: val
+    optimizer: {name: adamw, lr: 3e-4}
+    epochs: 30
+    save_to: ${paths.ckpt_root}/i2.pt
+
+  pretrain_i3:
+    run: train
+    component: i3
+    dataset: train
+    val: val
+    optimizer: {name: adamw, lr: 3e-4}
+    epochs: 40
+    save_to: ${paths.ckpt_root}/i3.pt
+
+  pretrain_r:
+    run: train_multi
+    components: [r1, r2, r3]
+    dataset: train
+    val: val
+    optimizer: {name: adamw, lr: 2e-4}
+    epochs: 60
+    save_to: ${paths.ckpt_root}/radar_*.pt}
+
+  pretrain_t:
+    run: train_multi
+    components: [t1, t2]
+    dataset: train
+    val: val
+    optimizer: {name: adamw, lr: 2e-4}
+    epochs: 50
+    save_to: ${paths.ckpt_root}/thermal_*.pt}
+
+  train_f2:
+    run: train_fusion
+    component: f2
+    freeze: [i1, i2, i3, r1, r2, r3, t1, t2]
+    dataset: train
+    val: val
+    optimizer: {name: adamw, lr: 1.5e-4}
+    epochs: 40
+    save_to: ${paths.ckpt_root}/f2.pt
+
+  train_f1:
+    run: fit_classical
+    component: f1
+    features_from: [r1, r2, r3, i1, i2, i3, t1, t2]
+    dataset: train
+    val: val
+    save_to: ${paths.ckpt_root}/f1.joblib
+
+  train_f3:
+    run: compile_rules
+    component: f3
+    rules_source: ./rules/ruleset.md
+    save_to: ${paths.ckpt_root}/f3.yaml
+
+  train_s:
+    run: calibrate_guard
+    component: s
+    dataset: val
+    inputs_from: [f2, f1]
+    save_to: ${paths.ckpt_root}/s.pt
+
+  eval_joint:
+    run: evaluate
+    components: [i1, i2, i3, r1, r2, r3, t1, t2, f2, f1, f3, s]
+    dataset: test
+    metrics: [auroc, brier, ece, f1, time_to_0p9]
+    report_to: ${paths.runs_root}/eval.json
+
+  infer_realtime:
+    run: serve
+    graph:
+      order: [i1, i2, i3, r1, r2, r3, t1, t2, f2, f1, f3, s]
+      outputs: [p_kill_masked, spoof_risk, explanation]
+    checkpoint_map:
+      i1: ${paths.ckpt_root}/i1.pt
+      i2: ${paths.ckpt_root}/i2.pt
+      i3: ${paths.ckpt_root}/i3.pt
+      r1: ${paths.ckpt_root}/radar_r1.pt
+      r2: ${paths.ckpt_root}/radar_r2.pt
+      r3: ${paths.ckpt_root}/radar_r3.pt
+      t1: ${paths.ckpt_root}/thermal_t1.pt
+      t2: ${paths.ckpt_root}/thermal_t2.pt
+      f2: ${paths.ckpt_root}/f2.pt
+      f1: ${paths.ckpt_root}/f1.joblib
+      f3: ${paths.ckpt_root}/f3.yaml
+      s: ${paths.ckpt_root}/s.pt
+
+pipelines:
+  joint_train:
+    steps: [pretrain_i1, pretrain_i2, pretrain_i3, pretrain_r, pretrain_t, train_f2, train_f1, train_f3, train_s, eval_joint]
+  edge_deploy:
+    steps: [infer_realtime]
