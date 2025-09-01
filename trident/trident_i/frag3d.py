@@ -42,7 +42,8 @@ class Down3D(nn.Module):
         super().__init__()
         self.conv1 = Conv3DBlock(in_channels, out_channels)
         self.conv2 = Conv3DBlock(out_channels, out_channels)
-        self.pool = nn.MaxPool3d(2)
+        # Pool only spatial dimensions, keep temporal dimension intact
+        self.pool = nn.MaxPool3d((1, 2, 2))  # (T, H, W) -> (T, H/2, W/2)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.conv1(x)
@@ -55,7 +56,8 @@ class Up3D(nn.Module):
     
     def __init__(self, in_channels: int, skip_channels: int, out_channels: int):
         super().__init__()
-        self.up = nn.ConvTranspose3d(in_channels, in_channels // 2, 2, 2)
+        # Upsample only spatial dimensions
+        self.up = nn.ConvTranspose3d(in_channels, in_channels // 2, (1, 2, 2), (1, 2, 2))
         self.conv1 = Conv3DBlock(in_channels // 2 + skip_channels, out_channels)
         self.conv2 = Conv3DBlock(out_channels, out_channels)
         
@@ -185,12 +187,13 @@ class Frag3D(BranchModule):
                         confidence = mask.max().item()
                         
                         event = EventToken(
-                            event_type="debris_detection",
-                            confidence=confidence,
-                            location=(int(center[1]), int(center[0])),  # (x, y)
-                            timestamp=t,
-                            source="frag3d",
-                            metadata={
+                            type="debris_detection",
+                            value=confidence,
+                            t_start=t,
+                            t_end=t,
+                            quality=confidence,
+                            meta={
+                                "location": (int(center[1]), int(center[0])),  # (x, y)
                                 "mask_area": (mask > threshold).sum().item(),
                                 "max_intensity": mask.max().item(),
                                 "batch_idx": b

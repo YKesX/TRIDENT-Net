@@ -4,5 +4,8 @@ from .f1_late_svm import LateFusionSVM
 from .f2_cross_attention import CrossAttentionFusion
 from .f3_fuzzy_rules import FuzzyRuleOverlay
 from .s_spoof_shield import SpoofShield
+from .calib_glm import CalibGLM
+from .cross_attn_fusion import CrossAttnFusion
 
-__all__ = ["LateFusionSVM", "CrossAttentionFusion", "FuzzyRuleOverlay", "SpoofShield"]
+__all__ = ["LateFusionSVM", "CrossAttentionFusion", "FuzzyRuleOverlay", "SpoofShield",
+           "CalibGLM", "CrossAttnFusion"]

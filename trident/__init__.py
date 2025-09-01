@@ -11,6 +11,7 @@ __version__ = "0.1.0"
 __author__ = "Yağızhan Keskin"
 
 from . import common, data, i_models, r_models, t_models, fusion_guard, runtime
+from . import trident_i, trident_t, trident_r
 
 __all__ = [
     "common",
@@ -18,6 +19,9 @@ __all__ = [
     "i_models",
     "r_models",
     "t_models",
+    "trident_i",
+    "trident_t", 
+    "trident_r",
     "fusion_guard",
     "runtime",
 ]
