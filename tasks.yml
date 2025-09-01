@@ -1,4 +1,4 @@
-version: 1
+version: 2
 name: trident-net
 python: ">=3.10"
 framework: pytorch
@@ -8,113 +8,234 @@ paths:
   runs_root: ./runs
   ckpt_root: ./checkpoints
 
+# =========================
+# COMPONENTS (with shapes)
+# =========================
 components:
+
+  # -----------------------
+  # I-BRANCH (RGB, 3 frames)
+  # -----------------------
   i1:
-    class: trident_i.FragCNN
-    kind: segmentation
-    inputs: [rgb_roi: BxCxHxW]
-    outputs: [mask: Bx1xHxW, zi: Bx256, events: list]
-    loss: dice_focal
-    metrics: [miou, f1]
-    config: {backbone: efficientnet_b0, channels: 3, out_dim: 256}
+    class: trident_i.Frag3D
+    kind: 3d_unet_segmentation
+    description: 3D encoder-decoder over 3 RGB frames; debris/smoke/flash masks + pooled embedding.
+    inputs:
+      rgb_seq: {shape: "B x 3 x 3 x 480 x 640", dtype: float32, norm: "per-channel"}
+    outputs:
+      mask_seq: {shape: "B x 3 x 1 x 480 x 640", dtype: float32}
+      zi: {shape: "B x 256", dtype: float32}
+      events: {type: list}
+    arch:
+      levels: 3
+      base_channels: 32
+      bottleneck_dim: 256
+      norm: group
+      activation: gelu
 
   i2:
-    class: trident_i.ThermAttentionV
-    kind: saliency
-    inputs: [rgb_roi_t: BxTxCxHxW]
-    outputs: [saliency: Bx1xHxW, zi: Bx256, events: list]
-    loss: bce
-    metrics: [auroc, ap]
-    config: {backbone: convnext_tiny, temporal: "1dconv", out_dim: 256}
+    class: trident_i.FlashNetV
+    kind: saliency_temporal
+    description: Per-frame 2D CNN (shared weights) + shallow temporal conv to capture flash/spark dynamics.
+    inputs:
+      rgb_seq: {shape: "B x 3 x 3 x 480 x 640", dtype: float32}
+    outputs:
+      saliency_seq: {shape: "B x 3 x 1 x 480 x 640", dtype: float32}
+      zi: {shape: "B x 256", dtype: float32}
+      events: {type: list}
+    arch:
+      backbone: convnext_tiny
+      temporal_kernel: 3
+      out_dim: 256
+      dropout: 0.1
 
   i3:
-    class: trident_i.DualVisionNet
-    kind: change_detection
-    inputs: [rgb_pre: BxCxHxW, rgb_post: BxCxHxW]
-    outputs: [change_mask: Bx1xHxW, integrity_delta: Bx1, zi: Bx256, events: list]
-    loss: ce_iou
-    metrics: [miou, mae]
-    config: {encoder: efficientnet_b0, transformer_heads: 4, out_dim: 256}
+    class: trident_i.DualVision
+    kind: siamese_change
+    description: Siamese encoder on pre/post RGB; correlation + tiny transformer for structural change.
+    inputs:
+      rgb_pre:  {shape: "B x 3 x 480 x 640", dtype: float32}
+      rgb_post: {shape: "B x 3 x 480 x 640", dtype: float32}
+    outputs:
+      change_mask: {shape: "B x 1 x 480 x 640", dtype: float32}
+      integrity_delta: {shape: "B x 1", dtype: float32}
+      zi: {shape: "B x 256", dtype: float32}
+      events: {type: list}
+    arch:
+      encoder: efficientnet_b0
+      transformer_heads: 4
+      transformer_layers: 2
+      out_dim: 256
 
-  r1:
-    class: trident_r.EchoNet
-    kind: cnn_1d
-    inputs: [rd_seq: BxTxFxR]
-    outputs: [zr: Bx256, events: list]
-    loss: ce
-    metrics: [auroc, f1]
-    config: {conv_blocks: 4, out_dim: 256}
-
-  r2:
-    class: trident_r.PulseLSTM
-    kind: bilstm
-    inputs: [pulse_feat: BxTxD]
-    outputs: [zr: Bx256, events: list]
-    loss: ce
-    metrics: [auroc]
-    config: {hidden: 256, layers: 2, bidirectional: true, out_dim: 256}
-
-  r3:
-    class: trident_r.RadarFormer
-    kind: transformer
-    inputs: [rd_tokens: BxTxD]
-    outputs: [zr: Bx256, events: list]
-    loss: ce
-    metrics: [auroc]
-    config: {d_model: 256, nhead: 8, nlayers: 6, out_dim: 256}
-
+  # ------------------------
+  # T-BRANCH (IR, 3 frames)
+  # ------------------------
   t1:
-    class: trident_t.PlumeNet
-    kind: detect_track
-    inputs: [ir_roi_t: BxTx1xHxW]
-    outputs: [tracks: list, zt: Bx256, events: list]
-    loss: giou_obj
-    metrics: [mAP50, mota]
-    config: {det_backbone: "lite", flow_head: "raft_lite", out_dim: 256}
+    class: trident_t.PlumeDetLite
+    kind: detect_track_3frame
+    description: Tiny anchor-free detector per IR frame + simple association to estimate plume/hotspots & motion.
+    inputs:
+      ir_seq: {shape: "B x 3 x 1 x 480 x 640", dtype: float32, norm: "min-max or zscore"}
+    outputs:
+      tracks: {type: "list[track]", note: "variable length per sample"}
+      zt: {shape: "B x 256", dtype: float32}
+      events: {type: list}
+    arch:
+      det_backbone: "lite"
+      head: "anchor_free"
+      max_tracks: 10
+      out_dim: 256
+
+    # Track object reference (for implementers):
+    # track = {id:int, t: [0,1,2], bbox: Float[3,4], intensity: Float[3], area: Float[3], valid_mask: Bool[3]}
 
   t2:
-    class: trident_t.CoolingCurve
-    kind: temporal_classifier
-    inputs: [curve_seq: BxTxD]
-    outputs: [tau: Bx1, debris_vs_flare: Bx2, zt: Bx256, events: list]
-    loss: huber_ce
-    metrics: [mae, auroc]
-    config: {arch: gru, hidden: 128, layers: 2, out_dim: 256}
+    class: trident_t.CoolCurve3
+    kind: temporal_curve_classifier
+    description: 3-point decay fit + MLP classifier over per-track intensity/area curves (pooled across tracks).
+    inputs:
+      curves: {shape: "B x M_max(=10) x 3", dtype: float32, note: "per-track intensity (padding with mask)"}
+      areas:  {shape: "B x M_max(=10) x 3", dtype: float32}
+      pad_mask: {shape: "B x M_max", dtype: bool}
+    outputs:
+      tau_hat: {shape: "B x 1", dtype: float32}
+      debris_vs_flare: {shape: "B x 2", dtype: float32}
+      zt: {shape: "B x 256", dtype: float32}
+      events: {type: list}
+    arch:
+      use_log_linear_fit: true
+      mlp_hidden: 128
+      out_dim: 256
+
+  # ---------------------------------
+  # R-BRANCH (Kinematics, 3 time steps)
+  # ---------------------------------
+  r1:
+    class: trident_r.KineFeat
+    kind: physics_features
+    description: Deterministic physical features from kinematics (LOS, closing speed, angle rates, range drops).
+    inputs:
+      k_seq: {shape: "B x 3 x 9", dtype: float32, order: "[x,y,z,vx,vy,vz,range,bearing,elevation]"}
+    outputs:
+      r_feats: {shape: "B x 24", dtype: float32}
+      events: {type: list}
+    features:
+      - los_vector_norm
+      - range_rate
+      - closing_speed
+      - angle_rate_bearing
+      - angle_rate_elevation
+      - lateral_miss_proxy
+      - accel_estimates
+
+  r2:
+    class: trident_r.GeoMLP
+    kind: mlp_embedding
+    description: Learned embedding on concatenated raw & delta kinematics plus r1 features.
+    inputs:
+      k_aug: {shape: "B x 69", dtype: float32, note: "concat[k0,k1,k2, Δk01,Δk12, r_feats] => 27+18+24=69"}
+    outputs:
+      zr2: {shape: "B x 192", dtype: float32}
+      events: {type: list}
+    arch:
+      hidden: [128, 192]
+      norm: layer
+      activation: gelu
+      dropout: 0.05
+
+  r3:
+    class: trident_r.TinyTempoFormer
+    kind: temporal_transformer
+    description: 2-layer transformer over 3 tokenized steps (projected per-step kinematics+delta into 32-D tokens).
+    inputs:
+      k_tokens: {shape: "B x 3 x 32", dtype: float32, note: "small MLP projects per-step kinematics to 32-D"}
+    outputs:
+      zr3: {shape: "B x 192", dtype: float32}
+      events: {type: list}
+    arch:
+      d_model: 192
+      n_heads: 4
+      n_layers: 2
+      token_dim: 32
+      dropout: 0.1
+
+  # -----------------------------
+  # FUSION + GUARD (same package)
+  # -----------------------------
+  f2:
+    class: fusion_guard.CrossAttnFusion
+    kind: transformer_fusion_multitask
+    description: Cross-modal transformer; outputs p_hit and p_kill with attention maps and top contributing events.
+    inputs:
+      zi: {shape: "B x 768", dtype: float32, note: "concat(i1.zi=256, i2.zi=256, i3.zi=256)"}
+      zt: {shape: "B x 512", dtype: float32, note: "concat(t1.zt=256, t2.zt=256)"}
+      zr: {shape: "B x 384", dtype: float32, note: "concat(r2.zr2=192, r3.zr3=192)"}
+      events: {type: list}
+    outputs:
+      z_fused: {shape: "B x 512", dtype: float32}
+      p_hit:   {shape: "B x 1", dtype: float32}
+      p_kill:  {shape: "B x 1", dtype: float32}
+      attn_maps: {type: dict}
+      top_events: {type: list}
+    arch:
+      d_model: 512
+      n_heads: 8
+      n_layers: 3
+      mlp_hidden: 256
+      dropout: 0.1
+    loss:
+      hit:  {type: bce, weight: 1.0}
+      kill: {type: bce, weight: 1.0}
+      calibration: {type: brier, weight: 0.2}
+    metrics: [auroc_hit, auroc_kill, f1_hit, f1_kill, brier, ece]
 
   f1:
-    class: fusion_guard.LateFusionSVM
-    kind: classical_ml
-    inputs: [zr: Bx256, zi: Bx256, zt: Bx256]
-    outputs: [p_kill_aux: Bx1]
-    config: {kernel: rbf, gamma: scale, c: 1.0}
-
-  f2:
-    class: fusion_guard.CrossAttentionFusion
-    kind: transformer_fusion
-    inputs: [zr: Bx256, zi: Bx256, zt: Bx256, events: list]
-    outputs: [z_fused: Bx384, p_kill_logits: Bx1, attn_maps: dict]
-    loss: bce
-    metrics: [brier, auroc, ece]
-    config: {d_model: 384, nhead: 8, nlayers: 4, dropout: 0.1}
-
-  f3:
-    class: fusion_guard.FuzzyRuleOverlay
-    kind: rules
-    inputs: [events: list, p_kill_in: Bx1]
-    outputs: [p_kill_ruled: Bx1, rationale: str]
-    config: {ruleset_path: ./configs/rules_f3.yaml}
+    class: fusion_guard.CalibGLM
+    kind: classical_baseline
+    description: Logistic (or GBM) baseline on detached features for sanity and calibration checks.
+    inputs:
+      features: {shape: "B x 1664", dtype: float32, note: "concat(zi, zt, zr) => 768+512+384"}
+    outputs:
+      p_hit_aux:  {shape: "B x 1", dtype: float32}
+      p_kill_aux: {shape: "B x 1", dtype: float32}
+    config:
+      model: "logreg"   # or "xgboost"
+      regularization: l2
 
   s:
     class: fusion_guard.SpoofShield
-    kind: guard
-    inputs: [events: list, z_fused: Bx384, geom: dict, priors: dict]
-    outputs: [p_kill_masked: Bx1, spoof_risk: Bx1, gates: dict, explanation: dict]
-    config: {consistency_dt_ms: 80, min_rcs_drop_db: 7, tau_bounds: [0.05, 0.6]}
+    kind: guard_plausibility
+    description: Cross-modal causality and physics plausibility checks; gates final probabilities; produces risk & rationale.
+    inputs:
+      p_hit:  {shape: "B x 1", dtype: float32}
+      p_kill: {shape: "B x 1", dtype: float32}
+      events: {type: list}
+      geom:   {type: dict, keys: [bearing, elevation]}
+      priors: {type: dict, note: "fragmentation/energy model params"}
+    outputs:
+      p_hit_masked:  {shape: "B x 1", dtype: float32}
+      p_kill_masked: {shape: "B x 1", dtype: float32}
+      spoof_risk:    {shape: "B x 1", dtype: float32}
+      gates:         {type: dict}
+      explanation:   {type: dict}
+    config:
+      consistency_dt_ms: 80
+      min_rcs_drop_db: 7
+      tau_bounds: [0.05, 0.6]
+      require_postframe_evidence: true
 
+# =========================
+# DATASETS (modalities)
+# =========================
 datasets:
   train:
     type: multimodal
     path: ${paths.data_root}/train
+    shapes:
+      rgb_seq: "B x 3 x 3 x 480 x 640"
+      ir_seq:  "B x 3 x 1 x 480 x 640"
+      k_seq:   "B x 3 x 9"
+      labels:  "{hit: B x 1, kill: B x 1}"
   val:
     type: multimodal
     path: ${paths.data_root}/val
@@ -122,14 +243,19 @@ datasets:
     type: multimodal
     path: ${paths.data_root}/test
 
+# =========================
+# TASKS (training/eval/serve)
+# =========================
 tasks:
+
+  # --- Pretraining I/T branches
   pretrain_i1:
     run: train
     component: i1
     dataset: train
     val: val
     optimizer: {name: adamw, lr: 3e-4, wd: 0.05}
-    epochs: 50
+    epochs: 40
     save_to: ${paths.ckpt_root}/i1.pt
 
   pretrain_i2:
@@ -147,31 +273,61 @@ tasks:
     dataset: train
     val: val
     optimizer: {name: adamw, lr: 3e-4}
-    epochs: 40
+    epochs: 35
     save_to: ${paths.ckpt_root}/i3.pt
 
-  pretrain_r:
-    run: train_multi
-    components: [r1, r2, r3]
+  pretrain_t1:
+    run: train
+    component: t1
     dataset: train
     val: val
     optimizer: {name: adamw, lr: 2e-4}
-    epochs: 60
-    save_to: ${paths.ckpt_root}/radar_*.pt}
+    epochs: 35
+    save_to: ${paths.ckpt_root}/t1.pt
 
-  pretrain_t:
-    run: train_multi
-    components: [t1, t2]
+  pretrain_t2:
+    run: train
+    component: t2
     dataset: train
     val: val
+    inputs_from: [t1]   # uses tracks to build curves
     optimizer: {name: adamw, lr: 2e-4}
-    epochs: 50
-    save_to: ${paths.ckpt_root}/thermal_*.pt}
+    epochs: 30
+    save_to: ${paths.ckpt_root}/t2.pt
 
+  # --- Pretraining R-branch (separate files)
+  precompute_r1:
+    run: featureize
+    component: r1
+    dataset: train
+    val: val
+    save_to: ${paths.ckpt_root}/r1_feats.npz
+
+  pretrain_r2:
+    run: train
+    component: r2
+    dataset: train
+    val: val
+    inputs_from: [r1]
+    optimizer: {name: adamw, lr: 2e-4}
+    epochs: 35
+    save_to: ${paths.ckpt_root}/r2.pt
+
+  pretrain_r3:
+    run: train
+    component: r3
+    dataset: train
+    val: val
+    inputs_from: [r1]
+    optimizer: {name: adamw, lr: 2e-4}
+    epochs: 35
+    save_to: ${paths.ckpt_root}/r3.pt
+
+  # --- Fusion & guard
   train_f2:
     run: train_fusion
     component: f2
-    freeze: [i1, i2, i3, r1, r2, r3, t1, t2]
+    freeze: [i1, i2, i3, t1, t2, r2, r3]
     dataset: train
     val: val
     optimizer: {name: adamw, lr: 1.5e-4}
@@ -181,52 +337,72 @@ tasks:
   train_f1:
     run: fit_classical
     component: f1
-    features_from: [r1, r2, r3, i1, i2, i3, t1, t2]
+    features_from: [i1, i2, i3, t1, t2, r2, r3]
     dataset: train
     val: val
     save_to: ${paths.ckpt_root}/f1.joblib
 
-  train_f3:
-    run: compile_rules
-    component: f3
-    rules_source: ./rules/ruleset.md
-    save_to: ${paths.ckpt_root}/f3.yaml
-
-  train_s:
+  calibrate_s:
     run: calibrate_guard
     component: s
     dataset: val
     inputs_from: [f2, f1]
     save_to: ${paths.ckpt_root}/s.pt
 
+  # --- Evaluation
   eval_joint:
     run: evaluate
-    components: [i1, i2, i3, r1, r2, r3, t1, t2, f2, f1, f3, s]
+    components: [i1, i2, i3, t1, t2, r2, r3, f2, f1, s]
     dataset: test
-    metrics: [auroc, brier, ece, f1, time_to_0p9]
+    metrics: [auroc_hit, auroc_kill, f1_hit, f1_kill, brier, ece]
     report_to: ${paths.runs_root}/eval.json
 
+  # --- Inference / serving
   infer_realtime:
     run: serve
     graph:
-      order: [i1, i2, i3, r1, r2, r3, t1, t2, f2, f1, f3, s]
-      outputs: [p_kill_masked, spoof_risk, explanation]
+      order: [i1, i2, i3, t1, t2, r1, r2, r3, f2, f1, s]
+      tensors:
+        in:
+          rgb_seq: "B x 3 x 3 x 480 x 640"
+          ir_seq:  "B x 3 x 1 x 480 x 640"
+          k_seq:   "B x 3 x 9"
+        out:
+          p_hit_masked:  "B x 1"
+          p_kill_masked: "B x 1"
+          spoof_risk:    "B x 1"
+          explanation:   dict
     checkpoint_map:
       i1: ${paths.ckpt_root}/i1.pt
       i2: ${paths.ckpt_root}/i2.pt
       i3: ${paths.ckpt_root}/i3.pt
-      r1: ${paths.ckpt_root}/radar_r1.pt
-      r2: ${paths.ckpt_root}/radar_r2.pt
-      r3: ${paths.ckpt_root}/radar_r3.pt
-      t1: ${paths.ckpt_root}/thermal_t1.pt
-      t2: ${paths.ckpt_root}/thermal_t2.pt
+      t1: ${paths.ckpt_root}/t1.pt
+      t2: ${paths.ckpt_root}/t2.pt
+      r2: ${paths.ckpt_root}/r2.pt
+      r3: ${paths.ckpt_root}/r3.pt
       f2: ${paths.ckpt_root}/f2.pt
       f1: ${paths.ckpt_root}/f1.joblib
-      f3: ${paths.ckpt_root}/f3.yaml
-      s: ${paths.ckpt_root}/s.pt
+      s:  ${paths.ckpt_root}/s.pt
 
+# =========================
+# PIPELINES
+# =========================
 pipelines:
   joint_train:
-    steps: [pretrain_i1, pretrain_i2, pretrain_i3, pretrain_r, pretrain_t, train_f2, train_f1, train_f3, train_s, eval_joint]
+    steps:
+      - pretrain_i1
+      - pretrain_i2
+      - pretrain_i3
+      - pretrain_t1
+      - pretrain_t2
+      - precompute_r1
+      - pretrain_r2
+      - pretrain_r3
+      - train_f2
+      - train_f1
+      - calibrate_s
+      - eval_joint
+
   edge_deploy:
-    steps: [infer_realtime]
+    steps:
+      - infer_realtime
