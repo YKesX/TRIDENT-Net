@@ -4,7 +4,7 @@ TRIDENT-F3: Fuzzy Rule Overlay (rule-based reasoning)
 Author: Yağızhan Keskin
 """
 
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any, Union, Tuple
 import yaml
 import re
 from pathlib import Path

@@ -1,0 +1,247 @@
+"""
+TRIDENT-R1: KineFeat - Deterministic physics features from kinematics
+
+Author: Yağızhan Keskin
+"""
+
+from typing import List, Tuple, Dict, Any
+
+import torch
+import torch.nn as nn
+import numpy as np
+
+from ..common.types import BranchModule, EventToken
+
+
+class KineFeat(BranchModule):
+    """
+    Deterministic physical features from kinematics.
+    
+    Computes physics-based features from kinematic sequence including
+    LOS vectors, closing speeds, angle rates, and range drops.
+    
+    Input: k_seq (B, 3, 9) - kinematic sequence [x,y,z,vx,vy,vz,range,bearing,elevation]
+    Outputs:
+        - r_feats (B, 24) - physics feature vector
+        - events (list) - kinematic events
+    """
+    
+    def __init__(self):
+        super().__init__(out_dim=24)
+        
+        # No learnable parameters - purely deterministic
+        
+    def forward(self, k_seq: torch.Tensor) -> Tuple[torch.Tensor, List[EventToken]]:
+        """
+        Forward pass through KineFeat.
+        
+        Args:
+            k_seq: Kinematic sequence (B, 3, 9)
+                   Features: [x, y, z, vx, vy, vz, range, bearing, elevation]
+                   
+        Returns:
+            tuple: (r_feats, events)
+                - r_feats: (B, 24) physics feature vector
+                - events: List of kinematic events
+        """
+        B, T, D = k_seq.shape
+        assert T == 3 and D == 9, f"Expected k_seq shape (B, 3, 9), got {k_seq.shape}"
+        
+        # Extract position and velocity components
+        positions = k_seq[:, :, :3]  # (B, 3, 3) - x, y, z
+        velocities = k_seq[:, :, 3:6]  # (B, 3, 3) - vx, vy, vz
+        ranges = k_seq[:, :, 6]  # (B, 3) - range
+        bearings = k_seq[:, :, 7]  # (B, 3) - bearing
+        elevations = k_seq[:, :, 8]  # (B, 3) - elevation
+        
+        # Compute all physics features
+        features = []
+        
+        # 1. LOS vector norms (3 features)
+        los_norms = self._compute_los_vector_norms(positions)
+        features.append(los_norms)
+        
+        # 2. Range rates (2 features)
+        range_rates = self._compute_range_rates(ranges)
+        features.append(range_rates)
+        
+        # 3. Closing speeds (3 features)
+        closing_speeds = self._compute_closing_speeds(positions, velocities)
+        features.append(closing_speeds)
+        
+        # 4. Angle rates - bearing (2 features)
+        bearing_rates = self._compute_angle_rates(bearings)
+        features.append(bearing_rates)
+        
+        # 5. Angle rates - elevation (2 features)
+        elevation_rates = self._compute_angle_rates(elevations)
+        features.append(elevation_rates)
+        
+        # 6. Lateral miss proxy (3 features)
+        lateral_miss = self._compute_lateral_miss_proxy(positions, velocities)
+        features.append(lateral_miss)
+        
+        # 7. Acceleration estimates (9 features: 3 time steps × 3 components)
+        accelerations = self._compute_acceleration_estimates(velocities)
+        features.append(accelerations)
+        
+        # Concatenate all features
+        r_feats = torch.cat(features, dim=1)  # (B, 24)
+        
+        # Extract kinematic events
+        # events = self._extract_kinematic_events(k_seq, r_feats)
+        events = []  # TODO: Fix EventToken interface
+        
+        return r_feats, events
+    
+    def _compute_los_vector_norms(self, positions: torch.Tensor) -> torch.Tensor:
+        """Compute line-of-sight vector norms."""
+        # LOS vector norms for each time step
+        los_norms = torch.norm(positions, dim=2)  # (B, 3)
+        return los_norms
+    
+    def _compute_range_rates(self, ranges: torch.Tensor) -> torch.Tensor:
+        """Compute range rates between consecutive time steps."""
+        # Range rate = Δrange / Δt (assuming Δt = 1)
+        range_rate_01 = ranges[:, 1] - ranges[:, 0]  # (B,)
+        range_rate_12 = ranges[:, 2] - ranges[:, 1]  # (B,)
+        return torch.stack([range_rate_01, range_rate_12], dim=1)  # (B, 2)
+    
+    def _compute_closing_speeds(self, positions: torch.Tensor, velocities: torch.Tensor) -> torch.Tensor:
+        """Compute closing speeds (radial velocity components)."""
+        closing_speeds = []
+        
+        for t in range(3):
+            pos = positions[:, t]  # (B, 3)
+            vel = velocities[:, t]  # (B, 3)
+            
+            # Unit LOS vector
+            pos_norm = torch.norm(pos, dim=1, keepdim=True)  # (B, 1)
+            los_unit = pos / (pos_norm + 1e-8)  # (B, 3)
+            
+            # Radial velocity (dot product)
+            radial_vel = torch.sum(vel * los_unit, dim=1)  # (B,)
+            closing_speeds.append(radial_vel)
+        
+        return torch.stack(closing_speeds, dim=1)  # (B, 3)
+    
+    def _compute_angle_rates(self, angles: torch.Tensor) -> torch.Tensor:
+        """Compute angle rates (angular velocity)."""
+        # Handle angle wrapping for rates
+        angle_rate_01 = self._angle_diff(angles[:, 1], angles[:, 0])  # (B,)
+        angle_rate_12 = self._angle_diff(angles[:, 2], angles[:, 1])  # (B,)
+        return torch.stack([angle_rate_01, angle_rate_12], dim=1)  # (B, 2)
+    
+    def _angle_diff(self, angle2: torch.Tensor, angle1: torch.Tensor) -> torch.Tensor:
+        """Compute angle difference handling wrapping."""
+        diff = angle2 - angle1
+        # Wrap to [-π, π]
+        diff = torch.atan2(torch.sin(diff), torch.cos(diff))
+        return diff
+    
+    def _compute_lateral_miss_proxy(self, positions: torch.Tensor, velocities: torch.Tensor) -> torch.Tensor:
+        """Compute lateral miss distance proxy."""
+        lateral_misses = []
+        
+        for t in range(3):
+            pos = positions[:, t]  # (B, 3)
+            vel = velocities[:, t]  # (B, 3)
+            
+            # Cross product of position and velocity gives angular momentum vector
+            # Its magnitude is proportional to lateral miss distance
+            cross_prod = torch.cross(pos, vel, dim=1)  # (B, 3)
+            lateral_miss = torch.norm(cross_prod, dim=1)  # (B,)
+            
+            # Normalize by range to get angular miss
+            pos_norm = torch.norm(pos, dim=1)
+            lateral_miss_norm = lateral_miss / (pos_norm + 1e-8)
+            
+            lateral_misses.append(lateral_miss_norm)
+        
+        return torch.stack(lateral_misses, dim=1)  # (B, 3)
+    
+    def _compute_acceleration_estimates(self, velocities: torch.Tensor) -> torch.Tensor:
+        """Compute acceleration estimates from velocity differences."""
+        # Acceleration = Δv / Δt (assuming Δt = 1)
+        accel_01 = velocities[:, 1] - velocities[:, 0]  # (B, 3)
+        accel_12 = velocities[:, 2] - velocities[:, 1]  # (B, 3)
+        
+        # Estimate acceleration at each time step
+        accel_0 = accel_01  # Forward difference
+        accel_1 = (accel_01 + accel_12) / 2  # Central difference
+        accel_2 = accel_12  # Backward difference
+        
+        # Flatten and concatenate
+        accelerations = torch.cat([accel_0, accel_1, accel_2], dim=1)  # (B, 9)
+        
+        return accelerations
+    
+    def _extract_kinematic_events(self, k_seq: torch.Tensor, r_feats: torch.Tensor) -> List[EventToken]:
+        """Extract kinematic events from sequence and features."""
+        events = []
+        B = k_seq.shape[0]
+        
+        # Extract specific features for event detection
+        ranges = k_seq[:, :, 6]  # (B, 3)
+        closing_speeds = r_feats[:, 5:8]  # (B, 3) - indices 5,6,7
+        lateral_miss = r_feats[:, 10:13]  # (B, 3) - indices 10,11,12
+        
+        for b in range(B):
+            # Check for rapid range closure
+            min_range = ranges[b].min().item()
+            range_rate = (ranges[b, 0] - ranges[b, -1]).item() / 2.0  # Average rate
+            
+            if min_range < 1000 and range_rate > 50:  # Close approach with significant closure
+                event = EventToken(
+                    event_type="close_approach",
+                    confidence=min(1.0, range_rate / 100.0),
+                    location=(0, 0),  # No spatial location for kinematics
+                    timestamp=ranges[b].argmin().item(),  # Time of closest approach
+                    source="kinefeat",
+                    metadata={
+                        'min_range': min_range,
+                        'range_rate': range_rate,
+                        'avg_closing_speed': closing_speeds[b].mean().item(),
+                        'avg_lateral_miss': lateral_miss[b].mean().item(),
+                        'batch_idx': b
+                    }
+                )
+                events.append(event)
+            
+            # Check for high lateral acceleration (maneuvering)
+            accel_magnitude = torch.norm(r_feats[b, 13:22].view(3, 3), dim=1)  # (3,) acceleration magnitudes
+            max_accel = accel_magnitude.max().item()
+            
+            if max_accel > 10.0:  # High acceleration threshold
+                event = EventToken(
+                    event_type="high_acceleration",
+                    confidence=min(1.0, max_accel / 50.0),
+                    location=(0, 0),
+                    timestamp=accel_magnitude.argmax().item(),
+                    source="kinefeat",
+                    metadata={
+                        'max_acceleration': max_accel,
+                        'accel_time': accel_magnitude.argmax().item(),
+                        'batch_idx': b
+                    }
+                )
+                events.append(event)
+            
+            # Check for zero-crossing in range rate (turning point)
+            range_rates = r_feats[b, 3:5]  # (2,) range rates
+            if range_rates[0] * range_rates[1] < 0:  # Sign change
+                event = EventToken(
+                    event_type="range_rate_reversal",
+                    confidence=0.8,
+                    location=(0, 0),
+                    timestamp=1,  # Middle time step
+                    source="kinefeat",
+                    metadata={
+                        'range_rate_before': range_rates[0].item(),
+                        'range_rate_after': range_rates[1].item(),
+                        'batch_idx': b
+                    }
+                )
+                events.append(event)
+        
+        return events
