@@ -28,6 +28,9 @@ except ImportError:
         def Option(default, *args, **kwargs):
             return default
         @staticmethod
+        def Argument(default, *args, **kwargs):
+            return default
+        @staticmethod
         def echo(msg):
             print(msg)
     
