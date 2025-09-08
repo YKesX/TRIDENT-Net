@@ -117,7 +117,7 @@ class Frag3D(BranchModule):
             self.up_blocks.append(Up3D(in_ch, skip_ch, out_ch))
             in_ch = out_ch
             
-        # Output head for masks
+        # Output head for masks (3 timesteps, 1 channel each)
         self.mask_head = nn.Conv3d(base_channels, 1, 1)
         
         # Global pooling for embedding
@@ -161,7 +161,9 @@ class Frag3D(BranchModule):
             x = up(x, skips[i])
             
         # Generate masks
-        mask_seq = torch.sigmoid(self.mask_head(x))
+        mask_logits = self.mask_head(x)  # (B, 1, T, H, W)
+        # Reshape to (B, T, 1, H, W) as expected by tasks.yml
+        mask_seq = torch.sigmoid(mask_logits.transpose(1, 2))  # (B, T, 1, H, W)
         
         # Generate events based on mask activations
         events = self._extract_events(mask_seq)
