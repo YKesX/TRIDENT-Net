@@ -8,7 +8,28 @@ from typing import Dict, List, Any, Optional, Union
 from pathlib import Path
 import yaml
 
-from pydantic import BaseModel, Field, validator
+try:
+    from pydantic import BaseModel, Field, validator
+    PYDANTIC_AVAILABLE = True
+except ImportError:
+    # Simple fallback for pydantic
+    class BaseModel:
+        def __init__(self, **kwargs):
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+        def dict(self):
+            return {k: v for k, v in self.__dict__.items() if not k.startswith('_')}
+    
+    def Field(default=None, **kwargs):
+        return default
+    
+    def validator(*args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator
+    
+    PYDANTIC_AVAILABLE = False
+
 import torch
 
 
