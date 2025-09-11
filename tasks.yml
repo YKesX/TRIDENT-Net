@@ -79,14 +79,32 @@ data:
     transforms:
       class: "data.transforms.AlbuStereoClip"  # NEW: synchronized RGB/IR augmentations
       rgb:
-        - name: "RandomBrightnessContrast"; p: 0.3; brightness_limit: 0.2; contrast_limit: 0.2
-        - name: "HueSaturationValue"; p: 0.2; hue_shift_limit: 8; sat_shift_limit: 12; val_shift_limit: 12
-        - name: "MotionBlur"; p: 0.1; blur_limit: 5
-        - name: "JPEGCompression"; p: 0.15; quality_lower: 70; quality_upper: 95
-        - name: "HorizontalFlip"; p: 0.5
+        - name: "RandomBrightnessContrast"
+          p: 0.3
+          brightness_limit: 0.2
+          contrast_limit: 0.2
+        - name: "HueSaturationValue"
+          p: 0.2
+          hue_shift_limit: 8
+          sat_shift_limit: 12
+          val_shift_limit: 12
+        - name: "MotionBlur"
+          p: 0.1
+          blur_limit: 5
+        - name: "JPEGCompression"
+          p: 0.15
+          quality_lower: 70
+          quality_upper: 95
+        - name: "HorizontalFlip"
+          p: 0.5
       ir:
-        - name: "CLAHE"; p: 0.2; clip_limit: 2.0; tile_grid_size: [8, 8]
-        - name: "GaussNoise"; p: 0.2; var_limit: [10.0, 40.0]
+        - name: "CLAHE"
+          p: 0.2
+          clip_limit: 2.0
+          tile_grid_size: [8, 8]
+        - name: "GaussNoise"
+          p: 0.2
+          var_limit: [10.0, 40.0]
       temporal:
         jitter_frames: 1         # ±1 frame random shift per segment, synced across modalities
         dropout_frames_p: 0.05   # randomly drop a frame in T (masked; keeps tensor shape)
@@ -263,7 +281,7 @@ components:
       max_iter: 200
       outputs:
         p_hit_aux: {shape: [B, 1]}
-        p_kill_aux:{shape: [B, 1]}
+        p_kill_aux: {shape: [B, 1]}
 
     s:
       name: "SpoofShield"
@@ -455,8 +473,8 @@ tests:
     zi:   {expect: [2, 768]}
     zt:   {expect: [2, 512]}
     zr:   {expect: [2, 384]}
-    p_hit:{expect: [2, 1]}
-    p_kill:{expect: [2, 1]}
+    p_hit: {expect: [2, 1]}
+    p_kill: {expect: [2, 1]}
   dataset:
     letterbox_multiple_of_32: true
     synchronized_augs: true
