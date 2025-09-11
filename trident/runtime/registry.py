@@ -27,14 +27,21 @@ class ComponentRegistry:
         
         # TRIDENT-I components
         component_mappings = {
-            # TRIDENT-I branch
+            # TRIDENT-I branch (legacy + new)
             "trident_i.Frag3D": "trident.trident_i.frag3d.Frag3D",
             "trident_i.FlashNetV": "trident.trident_i.flashnet_v.FlashNetV", 
             "trident_i.DualVision": "trident.trident_i.dualvision.DualVision",
             
-            # TRIDENT-T branch
+            # NEW I-branch modules
+            "trident_i.videox3d.VideoFrag3Dv2": "trident.trident_i.videox3d.VideoFrag3Dv2",
+            "trident_i.dualvision_v2.DualVisionV2": "trident.trident_i.dualvision_v2.DualVisionV2",
+            
+            # TRIDENT-T branch (legacy + new)
             "trident_t.PlumeDetLite": "trident.trident_t.plumedet_lite.PlumeDetLite",
             "trident_t.CoolCurve3": "trident.trident_t.coolcurve3.CoolCurve3",
+            
+            # NEW T-branch modules
+            "trident_t.ir_dettrack_v2.PlumeDetXL": "trident.trident_t.ir_dettrack_v2.PlumeDetXL",
             
             # TRIDENT-R branch
             "trident_r.KineFeat": "trident.trident_r.kinefeat.KineFeat",
@@ -45,6 +52,12 @@ class ComponentRegistry:
             "fusion_guard.CrossAttnFusion": "trident.fusion_guard.cross_attn_fusion.CrossAttnFusion",
             "fusion_guard.CalibGLM": "trident.fusion_guard.calib_glm.CalibGLM",
             "fusion_guard.SpoofShield": "trident.fusion_guard.spoof_shield.SpoofShield",
+            
+            # Data components
+            "data.dataset.VideoJsonlDataset": "trident.data.dataset.VideoJsonlDataset",
+            "data.transforms.AlbuStereoClip": "trident.data.transforms.AlbuStereoClip",
+            "data.video_ring.VideoRing": "trident.data.video_ring.VideoRing",
+            "data.collate.pad_tracks_collate": "trident.data.collate.pad_tracks_collate",
             
             # XAI
             "xai_text.Templater": "trident.xai_text.templater.Templater",
