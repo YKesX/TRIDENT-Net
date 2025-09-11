@@ -5,7 +5,7 @@ Author: Yağızhan Keskin
 """
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -19,19 +19,15 @@ class EventToken:
     Represents a discrete event detected by a sensor module.
     
     Args:
-        type: Event type identifier (e.g., "flash", "rcs_drop", "hotspot")
-        value: Event magnitude/strength as scalar or tensor
-        t_start: Event start time in seconds
-        t_end: Event end time in seconds  
-        quality: Confidence/quality score in [0,1]
-        meta: Additional metadata dictionary
+        type: Event type identifier (e.g., "rgb_activity", "ir_hotspot", "radar_spike") 
+        score: Event confidence/strength score in [0,1]
+        t_ms: Event time in milliseconds (integer)
+        meta: Additional metadata dictionary with optional fields
     """
     type: str
-    value: Union[float, np.ndarray, torch.Tensor]
-    t_start: float
-    t_end: float
-    quality: float
-    meta: Dict[str, Any]
+    score: float
+    t_ms: int
+    meta: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
