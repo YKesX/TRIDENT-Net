@@ -328,10 +328,10 @@ trident run-task pretrain_i1 --synthetic --epochs 1
 ## Citation
 
 ```bibtex
-@software{trident_net_2024,
+@software{trident_net_2025,
   title={TRIDENT-Net: Modular Multimodal Fusion System},
   author={Yağızhan Keskin},
-  year={2024},
+  year={2025},
   url={https://github.com/YKesX/TRIDENT-Net}
 }
 ```
