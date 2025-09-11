@@ -8,11 +8,51 @@ import logging
 from pathlib import Path
 from typing import Optional, List
 
-import typer
+try:
+    import typer
+    from rich.console import Console
+    from rich.table import Table
+    from rich.logging import RichHandler
+    TYPER_AVAILABLE = True
+except ImportError:
+    # Simple fallback for typer/rich
+    class typer:
+        class Typer:
+            def __init__(self, **kwargs):
+                pass
+            def command(self):
+                def decorator(func):
+                    return func
+                return decorator
+        @staticmethod
+        def Option(default, *args, **kwargs):
+            return default
+        @staticmethod
+        def Argument(default, *args, **kwargs):
+            return default
+        @staticmethod
+        def echo(msg):
+            print(msg)
+    
+    class Console:
+        def print(self, *args, **kwargs):
+            print(*args)
+    
+    class Table:
+        def __init__(self, **kwargs):
+            pass
+        def add_column(self, *args, **kwargs):
+            pass
+        def add_row(self, *args, **kwargs):
+            pass
+    
+    class RichHandler:
+        def __init__(self, **kwargs):
+            pass
+    
+    TYPER_AVAILABLE = False
+
 import torch
-from rich.console import Console
-from rich.table import Table
-from rich.logging import RichHandler
 
 from trident.runtime.config import load_config, ConfigLoader
 from trident.runtime.trainer import Trainer

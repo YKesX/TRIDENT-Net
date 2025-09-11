@@ -6,6 +6,7 @@ from .f3_fuzzy_rules import FuzzyRuleOverlay
 from .s_spoof_shield import SpoofShield
 from .calib_glm import CalibGLM
 from .cross_attn_fusion import CrossAttnFusion
+from .spoof_shield import SpoofShield as SpoofShieldNew
 
 __all__ = ["LateFusionSVM", "CrossAttentionFusion", "FuzzyRuleOverlay", "SpoofShield",
-           "CalibGLM", "CrossAttnFusion"]
+           "CalibGLM", "CrossAttnFusion", "SpoofShieldNew"]

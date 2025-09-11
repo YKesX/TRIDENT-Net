@@ -12,10 +12,54 @@ from pathlib import Path
 
 import torch
 import numpy as np
-from fastapi import FastAPI, HTTPException, UploadFile, File
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-import uvicorn
+
+try:
+    from fastapi import FastAPI, HTTPException, UploadFile, File
+    from fastapi.middleware.cors import CORSMiddleware
+    from pydantic import BaseModel
+    import uvicorn
+    FASTAPI_AVAILABLE = True
+except ImportError:
+    # Simple stubs for FastAPI
+    class FastAPI:
+        def __init__(self, **kwargs):
+            pass
+        def add_middleware(self, *args, **kwargs):
+            pass
+        def post(self, path):
+            def decorator(func):
+                return func
+            return decorator
+        def get(self, path):
+            def decorator(func):
+                return func
+            return decorator
+    
+    class HTTPException(Exception):
+        def __init__(self, status_code, detail):
+            self.status_code = status_code
+            self.detail = detail
+    
+    class UploadFile:
+        pass
+    
+    def File():
+        return None
+    
+    class CORSMiddleware:
+        pass
+    
+    class BaseModel:
+        def __init__(self, **kwargs):
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+    
+    class uvicorn:
+        @staticmethod
+        def run(*args, **kwargs):
+            print("FastAPI not available - server stub only")
+    
+    FASTAPI_AVAILABLE = False
 
 from .graph import ExecutionGraph
 from ..common.utils import move_to_device

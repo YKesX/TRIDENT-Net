@@ -133,16 +133,25 @@ datasets:
       rgb_seq: "B x 3 x 3 x 768 x 1120"     # (batch,time,channels,H,W)
       ir_seq:  "B x 3 x 1 x 768 x 1120"
       k_seq:   "B x 3 x 9"
-      class_id:"B"
+      class_id: "B"
       labels:  "{hit: B x 1, kill: B x 1}"
     augment:
       rgb:
-        - type: "HorizontalFlip"; p: 0.5
-        - type: "RandomBrightnessContrast"; p: 0.3; brightness_limit: 0.2; contrast_limit: 0.2
-        - type: "GaussianBlur"; p: 0.2; blur_limit: 3
+        - type: "HorizontalFlip"
+          p: 0.5
+        - type: "RandomBrightnessContrast"
+          p: 0.3
+          brightness_limit: 0.2
+          contrast_limit: 0.2
+        - type: "GaussianBlur"
+          p: 0.2
+          blur_limit: 3
       ir:
-        - type: "GaussianNoise"; p: 0.3; var_limit: [1e-5, 1e-3]
-        - type: "CLAHE"; p: 0.2
+        - type: "GaussianNoise"
+          p: 0.3
+          var_limit: [1e-5, 1e-3]
+        - type: "CLAHE"
+          p: 0.2
       sync_temporal_jitter_ms: 12
       kinematics_noise_std: 0.01
   val:
@@ -426,7 +435,7 @@ hparam_search:
       dropout:   {type: uniform,    low: 0.0,  high: 0.3}
       n_layers:  {type: int,        low: 2,    high: 5}
       n_heads:   {type: choice,     values: [4, 8]}
-      mlp_hidden:{type: choice,     values: [192, 256, 384]}
+      mlp_hidden: {type: choice,     values: [192, 256, 384]}
   i1:
     engine: "optuna"
     n_trials: 20
@@ -434,7 +443,7 @@ hparam_search:
     metric: "f1_hit"
     space:
       base_channels: {type: choice, values: [24, 32, 48]}
-      bottleneck_dim:{type: choice, values: [128, 256, 320]}
+      bottleneck_dim: {type: choice, values: [128, 256, 320]}
       lr:            {type: loguniform, low: 1e-5, high: 3e-4}
   t1:
     engine: "optuna"

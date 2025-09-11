@@ -188,8 +188,56 @@ def generate_curve_sequence(
 def generate_synthetic_batch(
     batch_size: int = 8,
     device: Optional[torch.device] = None,
+) -> Dict[str, Any]:
+    """
+    Generate synthetic batch following tasks.yml specification.
+    
+    Expected shapes from tasks.yml:
+    - rgb_seq: B x 3 x 3 x 768 x 1120 (batch, time, channels, H, W)
+    - ir_seq:  B x 3 x 1 x 768 x 1120  
+    - k_seq:   B x 3 x 9 (batch, time, features)
+    - class_id: B
+    - labels: {hit: B x 1, kill: B x 1}
+    """
+    if device is None:
+        device = torch.device("cpu")
+    
+    batch = {
+        # RGB sequence: B x 3 x 3 x 768 x 1120 (3 frames, 3 channels each)
+        "rgb_seq": torch.rand(batch_size, 3, 3, 768, 1120, device=device),
+        
+        # IR sequence: B x 3 x 1 x 768 x 1120 (3 frames, 1 channel each)  
+        "ir_seq": torch.rand(batch_size, 3, 1, 768, 1120, device=device),
+        
+        # Kinematics sequence: B x 3 x 9 (3 timesteps, 9 features)
+        # Features: ["x","y","z","vx","vy","vz","range","bearing","elevation"]
+        "k_seq": torch.randn(batch_size, 3, 9, device=device),
+        
+        # Optional class ID
+        "class_id": torch.randint(0, 8, (batch_size,), device=device),
+        
+        # Outcome labels
+        "y_outcome": {
+            "hit": torch.rand(batch_size, 1, device=device),   # [0,1] probabilities
+            "kill": torch.rand(batch_size, 1, device=device),  # [0,1] probabilities
+        },
+        
+        # Metadata
+        "meta": [{"sample_id": i} for i in range(batch_size)],
+        
+        # Geometry and priors for guard module
+        "geom": [{"bearing": 0.5 * np.random.randn(), "elevation": 0.2 * np.random.randn()} for _ in range(batch_size)],
+        "priors": [{"baseline_prob": 0.1 + 0.05 * np.random.randn()} for _ in range(batch_size)],
+    }
+    
+    return batch
+
+
+def generate_synthetic_batch_legacy(
+    batch_size: int = 8,
+    device: Optional[torch.device] = None,
 ) -> Dict[str, torch.Tensor]:
-    """Generate a complete synthetic batch for testing."""
+    """Generate a complete synthetic batch for testing (legacy format)."""
     if device is None:
         device = torch.device("cpu")
     
@@ -216,6 +264,44 @@ def generate_synthetic_batch(
     }
     
     return batch
+
+
+class SyntheticDataset(torch.utils.data.Dataset):
+    """
+    Synthetic dataset for testing.
+    
+    Generates data on-demand to match tasks.yml specification.
+    """
+    
+    def __init__(self, n_samples: int = 1000):
+        self.n_samples = n_samples
+        
+    def __len__(self) -> int:
+        return self.n_samples
+        
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        """Generate a single sample."""
+        # Use the index as a seed for reproducibility
+        torch.manual_seed(idx)
+        np.random.seed(idx)
+        
+        # Generate single sample (batch_size=1)
+        batch = generate_synthetic_batch(batch_size=1)
+        
+        # Remove batch dimension to get individual sample
+        sample = {}
+        for key, value in batch.items():
+            if isinstance(value, torch.Tensor):
+                sample[key] = value.squeeze(0)  # Remove batch dimension
+            elif isinstance(value, dict):
+                # Handle nested dict (like y_outcome)
+                sample[key] = {k: v.squeeze(0) if isinstance(v, torch.Tensor) else v for k, v in value.items()}
+            elif isinstance(value, list):
+                sample[key] = value[0]  # Take first element
+            else:
+                sample[key] = value
+                
+        return sample
 
 
 def create_synthetic_dataset(
@@ -272,12 +358,25 @@ class SyntheticDataset(torch.utils.data.Dataset):
         return self.n_samples
     
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        # Generate sample on-the-fly with deterministic seed
+        """Generate a single sample."""
+        # Use the index as a seed for reproducibility
         torch.manual_seed(idx)
         np.random.seed(idx)
         
+        # Generate single sample (batch_size=1)
         batch = generate_synthetic_batch(batch_size=1)
-        sample = {k: v.squeeze(0) if isinstance(v, torch.Tensor) else v[0] 
-                 for k, v in batch.items()}
         
+        # Remove batch dimension to get individual sample
+        sample = {}
+        for key, value in batch.items():
+            if isinstance(value, torch.Tensor):
+                sample[key] = value.squeeze(0)  # Remove batch dimension
+            elif isinstance(value, dict):
+                # Handle nested dict (like y_outcome)
+                sample[key] = {k: v.squeeze(0) if isinstance(v, torch.Tensor) else v for k, v in value.items()}
+            elif isinstance(value, list):
+                sample[key] = value[0]  # Take first element
+            else:
+                sample[key] = value
+                
         return sample

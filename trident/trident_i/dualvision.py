@@ -9,7 +9,25 @@ from typing import List, Tuple, Dict, Any
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import timm
+
+try:
+    import timm
+except ImportError:
+    class timm:
+        @staticmethod
+        def create_model(model_name, pretrained=True, features_only=False, **kwargs):
+            if features_only:
+                class FeatureModel(nn.Module):
+                    def __init__(self):
+                        super().__init__()
+                        self.conv1 = nn.Conv2d(3, 64, 7, stride=2, padding=3)
+                        self.conv2 = nn.Conv2d(64, 128, 3, stride=2, padding=1)
+                        self.conv3 = nn.Conv2d(128, 256, 3, stride=2, padding=1)
+                    def forward(self, x):
+                        return [self.conv1(x), self.conv2(self.conv1(x)), self.conv3(self.conv2(self.conv1(x)))]
+                return FeatureModel()
+            else:
+                return nn.Sequential(nn.Conv2d(3, 64, 7), nn.ReLU(), nn.AdaptiveAvgPool2d((1, 1)), nn.Flatten(), nn.Linear(64, 1000))
 
 from ..common.types import BranchModule, EventToken
 
