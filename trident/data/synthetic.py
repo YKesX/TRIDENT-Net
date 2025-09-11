@@ -263,38 +263,46 @@ def generate_synthetic_batch_variable_t(
     """
     Generate synthetic batch for variable-T video testing.
     
-    Expected shapes matching tasks.yml:
-    - rgb: B x 3 x T x 704 x 1248
-    - ir:  B x 1 x T x 704 x 1248  
-    - kin: B x 3 x 9 (pre, fire, post)
+    Expected shapes matching tasks.yml (native 1280×720):
+    - rgb_seq: B x 3 x T x 720 x 1280 
+    - ir_seq:  B x 1 x T x 720 x 1280  
+    - k_seq: B x 3 x 9 (pre, fire, post)
     - class_id: B
-    - labels: {hit: B x 1, kill: B x 1}
+    - y_outcome: {hit: B x 1, kill: B x 1}
     """
     if device is None:
         device = torch.device("cpu")
     
-    # Generate video clips with synthetic motion
-    rgb = torch.randn(batch_size, 3, T, 704, 1248, device=device)
-    ir = torch.randn(batch_size, 1, T, 704, 1248, device=device)
+    # Generate video clips with synthetic motion at native 1280×720
+    rgb = torch.randn(batch_size, 3, T, 720, 1280, device=device)
+    ir = torch.randn(batch_size, 1, T, 720, 1280, device=device)
+    
+    # Normalize to [0,1] range for RGB and IR
+    rgb = torch.sigmoid(rgb)  # Maps randn to approximately [0,1]
+    ir = torch.sigmoid(ir)
     
     # Add some temporal structure
     for b in range(batch_size):
         for t in range(T):
             # Add moving objects
             x_pos = int(200 + 100 * np.sin(2 * np.pi * t / T))
-            y_pos = int(300 + 50 * np.cos(2 * np.pi * t / T))
+            y_pos = int(200 + 50 * np.cos(2 * np.pi * t / T))
             
             # RGB object
-            if x_pos < 1200 and y_pos < 650:
-                rgb[b, :, t, y_pos:y_pos+54, x_pos:x_pos+48] += 0.5
+            if x_pos < 1230 and y_pos < 670:
+                rgb[b, :, t, y_pos:y_pos+50, x_pos:x_pos+50] += 0.5
             
             # IR hotspot (delayed relative to RGB)
             ir_delay = max(0, t - 5)
             ir_x = int(200 + 100 * np.sin(2 * np.pi * ir_delay / T))
-            ir_y = int(300 + 50 * np.cos(2 * np.pi * ir_delay / T))
+            ir_y = int(200 + 50 * np.cos(2 * np.pi * ir_delay / T))
             
-            if ir_x < 1200 and ir_y < 650:
-                ir[b, 0, t, ir_y:ir_y+54, ir_x:ir_x+48] += 1.0
+            if ir_x < 1230 and ir_y < 670:
+                ir[b, 0, t, ir_y:ir_y+50, ir_x:ir_x+50] += 1.0
+    
+    # Clamp values to [0,1] after adding motion patterns
+    rgb = torch.clamp(rgb, 0, 1)
+    ir = torch.clamp(ir, 0, 1)
     
     # Kinematics for (pre, fire, post) windows  
     kin = torch.randn(batch_size, 3, 9, device=device)
@@ -325,11 +333,11 @@ def generate_synthetic_batch_variable_t(
         })
     
     batch = {
-        'rgb': rgb,
-        'ir': ir,
-        'kin': kin,
+        'rgb_seq': rgb,  # Changed from 'rgb' to match test expectations
+        'ir_seq': ir,    # Changed from 'ir' to match test expectations
+        'k_seq': kin,    # Changed from 'kin' to match test expectations
         'class_id': class_id,
-        'labels': {
+        'y_outcome': {    # Changed from 'labels' to match test expectations
             'hit': hit_labels,
             'kill': kill_labels
         },
@@ -346,22 +354,22 @@ def generate_synthetic_batch(
     """
     Generate synthetic batch following tasks.yml specification.
     
-    Expected shapes from tasks.yml:
-    - rgb_seq: B x 3 x 3 x 768 x 1120 (batch, time, channels, H, W)
-    - ir_seq:  B x 3 x 1 x 768 x 1120  
+    Expected shapes from tasks.yml (native 1280×720):
+    - rgb_seq: B x 3 x 3 x 720 x 1280 (batch, time, channels, H, W)
+    - ir_seq:  B x 3 x 1 x 720 x 1280  
     - k_seq:   B x 3 x 9 (batch, time, features)
     - class_id: B
-    - labels: {hit: B x 1, kill: B x 1}
+    - y_outcome: {hit: B x 1, kill: B x 1}
     """
     if device is None:
         device = torch.device("cpu")
     
     batch = {
-        # RGB sequence: B x 3 x 3 x 768 x 1120 (3 frames, 3 channels each)
-        "rgb_seq": torch.rand(batch_size, 3, 3, 768, 1120, device=device),
+        # RGB sequence: B x 3 x 3 x 720 x 1280 (3 frames, 3 channels each) - normalized to [0,1]
+        "rgb_seq": torch.rand(batch_size, 3, 3, 720, 1280, device=device),
         
-        # IR sequence: B x 3 x 1 x 768 x 1120 (3 frames, 1 channel each)  
-        "ir_seq": torch.rand(batch_size, 3, 1, 768, 1120, device=device),
+        # IR sequence: B x 3 x 1 x 720 x 1280 (3 frames, 1 channel each) - normalized to [0,1]
+        "ir_seq": torch.rand(batch_size, 3, 1, 720, 1280, device=device),
         
         # Kinematics sequence: B x 3 x 9 (3 timesteps, 9 features)
         # Features: ["x","y","z","vx","vy","vz","range","bearing","elevation"]

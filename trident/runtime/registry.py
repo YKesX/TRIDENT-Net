@@ -43,25 +43,29 @@ class ComponentRegistry:
             # NEW T-branch modules
             "trident_t.ir_dettrack_v2.PlumeDetXL": "trident.trident_t.ir_dettrack_v2.PlumeDetXL",
             
+            # TRIDENT-T branch (legacy + existing)
+            "trident_t.coolcurve3.CoolCurve3": "trident.trident_t.coolcurve3.CoolCurve3",
+            
             # TRIDENT-R branch
-            "trident_r.KineFeat": "trident.trident_r.kinefeat.KineFeat",
-            "trident_r.GeoMLP": "trident.trident_r.geomlp.GeoMLP", 
-            "trident_r.TinyTempoFormer": "trident.trident_r.tiny_temporal_former.TinyTempoFormer",
+            "trident_r.kinefeat.KineFeat": "trident.trident_r.kinefeat.KineFeat",
+            "trident_r.geomlp.GeoMLP": "trident.trident_r.geomlp.GeoMLP", 
+            "trident_r.tiny_temporal_former.TinyTempoFormer": "trident.trident_r.tiny_temporal_former.TinyTempoFormer",
             
             # Fusion & Guard
-            "fusion_guard.CrossAttnFusion": "trident.fusion_guard.cross_attn_fusion.CrossAttnFusion",
-            "fusion_guard.CalibGLM": "trident.fusion_guard.calib_glm.CalibGLM",
-            "fusion_guard.SpoofShield": "trident.fusion_guard.spoof_shield.SpoofShield",
+            "fusion_guard.cross_attn_fusion.CrossAttnFusion": "trident.fusion_guard.cross_attn_fusion.CrossAttnFusion",
+            "fusion_guard.calib_glm.CalibGLM": "trident.fusion_guard.calib_glm.CalibGLM",
+            "fusion_guard.spoof_shield.SpoofShield": "trident.fusion_guard.spoof_shield.SpoofShield",
             
             # Data components
             "data.dataset.VideoJsonlDataset": "trident.data.dataset.VideoJsonlDataset",
             "data.transforms.AlbuStereoClip": "trident.data.transforms.AlbuStereoClip",
             "data.video_ring.VideoRing": "trident.data.video_ring.VideoRing",
             "data.collate.pad_tracks_collate": "trident.data.collate.pad_tracks_collate",
+            "data.synthetic.SyntheticVideoJsonl": "trident.data.synthetic.SyntheticVideoJsonl",
             
             # XAI
-            "xai_text.Templater": "trident.xai_text.templater.Templater",
-            "xai_text.SmallLLMReporter": "trident.xai_text.small_llm_reporter.SmallLLMReporter",
+            "xai_text.templater.Templater": "trident.xai_text.templater.Templater",
+            "xai_text.small_llm_reporter.SmallLLMReporter": "trident.xai_text.small_llm_reporter.SmallLLMReporter",
             
             # Analytics (optional)
             "analytics.ClusterMiner": "trident.analytics.cluster_miner.ClusterMiner",

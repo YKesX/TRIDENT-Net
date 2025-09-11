@@ -13,7 +13,12 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.cuda.amp import GradScaler, autocast
-from tqdm import tqdm
+try:
+    from tqdm import tqdm
+except ImportError:
+    import sys
+    sys.path.append('.')
+    from tqdm_stub import tqdm
 
 from .config import ConfigLoader, TaskConfig, OptimizerConfig
 from .graph import ExecutionGraph

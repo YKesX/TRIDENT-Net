@@ -10,7 +10,12 @@ import logging
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from tqdm import tqdm
+try:
+    from tqdm import tqdm
+except ImportError:
+    import sys
+    sys.path.append('.')
+    from tqdm_stub import tqdm
 import numpy as np
 
 from .config import ConfigLoader

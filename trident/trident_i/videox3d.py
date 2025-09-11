@@ -98,10 +98,17 @@ class VideoFrag3Dv2(nn.Module):
         self.decoder_blocks = nn.ModuleList()
         self.decoder_upsamples = nn.ModuleList()
         
+        # Track encoder channel dimensions for skip connections
+        encoder_channels = []
+        ch = base_channels
+        for i in range(depth):
+            encoder_channels.append(ch)
+            ch *= 2
+        encoder_channels.reverse()  # Reverse for decoder order
+        
         in_ch = bottleneck_ch * 2
         for i in range(depth):
-            level = depth - 1 - i
-            out_ch = base_channels * (2 ** level) if level > 0 else base_channels
+            out_ch = encoder_channels[i]
             
             # Upsample (except first decoder layer)
             if i > 0:
@@ -115,7 +122,7 @@ class VideoFrag3Dv2(nn.Module):
                 in_ch = in_ch // 2
             
             # Decoder block (with skip connection handling)
-            skip_ch = base_channels * (2 ** level) if level < depth - 1 else 0
+            skip_ch = encoder_channels[i] if i < len(encoder_channels) else 0
             block = self._make_conv_block(
                 in_ch + skip_ch, out_ch, temporal_kernel, norm, act
             )

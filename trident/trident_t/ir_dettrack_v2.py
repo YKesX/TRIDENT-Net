@@ -217,26 +217,36 @@ class PlumeDetXL(nn.Module):
     
     def _make_residual_block(self, in_channels: int, out_channels: int) -> nn.Module:
         """Create residual block."""
-        layers = []
+        class ResidualBlock(nn.Module):
+            def __init__(self, in_channels: int, out_channels: int):
+                super().__init__()
+                self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
+                self.bn1 = nn.BatchNorm2d(out_channels)
+                self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
+                self.bn2 = nn.BatchNorm2d(out_channels)
+                self.relu = nn.ReLU(inplace=True)
+                
+                # Skip connection
+                self.skip = nn.Identity()
+                if in_channels != out_channels:
+                    self.skip = nn.Conv2d(in_channels, out_channels, 1)
+            
+            def forward(self, x):
+                identity = self.skip(x)
+                
+                out = self.conv1(x)
+                out = self.bn1(out)
+                out = self.relu(out)
+                
+                out = self.conv2(out)
+                out = self.bn2(out)
+                
+                out += identity
+                out = self.relu(out)
+                
+                return out
         
-        # First conv
-        layers.append(nn.Conv2d(in_channels, out_channels, 3, padding=1))
-        layers.append(nn.BatchNorm2d(out_channels))
-        layers.append(nn.ReLU(inplace=True))
-        
-        # Second conv
-        layers.append(nn.Conv2d(out_channels, out_channels, 3, padding=1))
-        layers.append(nn.BatchNorm2d(out_channels))
-        
-        # Skip connection
-        skip = nn.Identity()
-        if in_channels != out_channels:
-            skip = nn.Conv2d(in_channels, out_channels, 1)
-        
-        return nn.Sequential(
-            *layers,
-            # Add residual connection handled in forward
-        ), skip
+        return ResidualBlock(in_channels, out_channels)
     
     def _get_backbone_channels(self) -> List[int]:
         """Get number of channels at each backbone level."""
@@ -352,8 +362,9 @@ class PlumeDetXL(nn.Module):
             x = backbone_features[-1]  # Start from top level
             
             for i in range(len(backbone_features) - 1, -1, -1):
-                # Lateral connection
-                lateral = self.fpn['lateral'][i](backbone_features[i])
+                # Lateral connection - adjust index for FPN which skips first layer
+                lateral_idx = i  # Use direct index since we collected features from i > 0
+                lateral = self.fpn['lateral'][lateral_idx](backbone_features[i])
                 
                 # Top-down
                 if fpn_features:
@@ -369,7 +380,7 @@ class PlumeDetXL(nn.Module):
                     x = lateral
                 
                 # Smooth
-                x = self.fpn['smooth'][i](x)
+                x = self.fpn['smooth'][lateral_idx](x)
                 fpn_features.append(x)
             
             # Use middle level features

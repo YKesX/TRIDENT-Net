@@ -29,13 +29,13 @@ def test_new_component_shapes():
         model = VideoFrag3Dv2(out_embed_dim=512)
         batch_size = 2
         T = 36  # Variable T frames
-        rgb = torch.randn(batch_size, 3, T, 704, 1248)
+        rgb = torch.randn(batch_size, 3, T, 720, 1280)
         
         with torch.no_grad():
             outputs = model(rgb)
         
         # Verify shapes
-        assert outputs['mask_seq'].shape == (batch_size, T, 1, 704, 1248), f"VideoFrag3Dv2 mask_seq shape: {outputs['mask_seq'].shape}"
+        assert outputs['mask_seq'].shape == (batch_size, T, 1, 720, 1280), f"VideoFrag3Dv2 mask_seq shape: {outputs['mask_seq'].shape}"
         assert outputs['zi'].shape == (batch_size, 512), f"VideoFrag3Dv2 zi shape: {outputs['zi'].shape}"
         assert isinstance(outputs['events'], list), "VideoFrag3Dv2 events should be list"
         
@@ -51,13 +51,13 @@ def test_new_component_shapes():
         model = DualVisionV2(out_embed_dim=256)
         batch_size = 2
         T = 36
-        rgb = torch.randn(batch_size, 3, T, 704, 1248)
+        rgb = torch.randn(batch_size, 3, T, 720, 1280)
         
         with torch.no_grad():
             outputs = model(rgb)
         
         # Verify shapes
-        assert outputs['change_mask'].shape == (batch_size, 1, 704, 1248), f"DualVisionV2 change_mask shape: {outputs['change_mask'].shape}"
+        assert outputs['change_mask'].shape == (batch_size, 1, 720, 1280), f"DualVisionV2 change_mask shape: {outputs['change_mask'].shape}"
         assert outputs['integrity_delta'].shape == (batch_size, 1), f"DualVisionV2 integrity_delta shape: {outputs['integrity_delta'].shape}"
         assert outputs['zi'].shape == (batch_size, 256), f"DualVisionV2 zi shape: {outputs['zi'].shape}"
         assert isinstance(outputs['events'], list), "DualVisionV2 events should be list"
@@ -74,7 +74,7 @@ def test_new_component_shapes():
         model = PlumeDetXL(pool_to_embed=256)
         batch_size = 2
         T = 36
-        ir = torch.randn(batch_size, 1, T, 704, 1248)
+        ir = torch.randn(batch_size, 1, T, 720, 1280)
         
         with torch.no_grad():
             outputs = model(ir)
@@ -109,10 +109,10 @@ def test_data_components():
     try:
         from trident.data.collate import pad_tracks_collate
         
-        # Test collate function with dummy batch
+        # Test collate function with dummy batch  
         batch = [
-            {'rgb': torch.randn(3, 10, 704, 1248), 'tracks': [{'id': 1}, {'id': 2}]},
-            {'rgb': torch.randn(3, 12, 704, 1248), 'tracks': [{'id': 3}]}
+            {'rgb': torch.randn(3, 10, 720, 1280), 'tracks': [{'id': 1}, {'id': 2}]},
+            {'rgb': torch.randn(3, 12, 720, 1280), 'tracks': [{'id': 3}]}
         ]
         
         result = pad_tracks_collate(batch)
@@ -123,24 +123,24 @@ def test_data_components():
 
 
 def test_rgb_shapes():
-    """Test RGB input shapes match spec: B x 3 x T x 704 x 1248"""
+    """Test RGB input shapes match spec: B x 3 x T x 720 x 1280"""
     # Test with variable T
     batch_size = 2
     T = 36  # Variable temporal dimension
-    rgb_seq = torch.randn(batch_size, 3, T, 704, 1248)
+    rgb_seq = torch.randn(batch_size, 3, T, 720, 1280)
     
-    assert rgb_seq.shape == (batch_size, 3, T, 704, 1248), f"RGB shape mismatch: expected [B, 3, T, 704, 1248]"
+    assert rgb_seq.shape == (batch_size, 3, T, 720, 1280), f"RGB shape mismatch: expected [B, 3, T, 720, 1280], got {rgb_seq.shape}"
     print(f"✅ RGB shape test passed: {rgb_seq.shape}")
 
 
 def test_ir_shapes():
-    """Test IR input shapes match spec: B x 1 x T x 704 x 1248"""
+    """Test IR input shapes match spec: B x 1 x T x 720 x 1280"""
     # Test with variable T
     batch_size = 2
     T = 36
-    ir_seq = torch.randn(batch_size, 1, T, 704, 1248)
+    ir_seq = torch.randn(batch_size, 1, T, 720, 1280)
     
-    assert ir_seq.shape == (batch_size, 1, T, 704, 1248), f"IR shape mismatch: expected [B, 1, T, 704, 1248]"
+    assert ir_seq.shape == (batch_size, 1, T, 720, 1280), f"IR shape mismatch: expected [B, 1, T, 720, 1280], got {ir_seq.shape}"
     print(f"✅ IR shape test passed: {ir_seq.shape}")
 
 
