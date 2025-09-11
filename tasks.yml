@@ -1,735 +1,467 @@
-version: 2
-name: trident-net
+# tasks.yml — TRIDENT-Net (video clip, shoot→hit→kill)
+version: 0.3
+created_at: 2025-09-11
 description: >
-  Multimodal outcome-assessment training/config file for TRIDENT-Net with
-  RGB/IR/kinematics branches, cross-attention fusion, guard, explainability
-  (one-liner + full report LLM), hyperparameter tuning, normal/final training
-  modes, video trigger inference, and optional clustering/association-rule
-  mining for weak supervision and interpretability.
-#
-# ──────────────────────────────────────────────────────────────────────────────
-# RUNTIME / ENV
-# ──────────────────────────────────────────────────────────────────────────────
-runtime:
+  Multimodal clip pipeline with explicit shoot→hit→kill timing; upgraded RGB/IR branches for
+  variable-length clips; fusion + guard; synthetic-ready; fully testable end-to-end.
+
+environment:
   python: "3.12.11"
-  pytorch: "2.8.0"              # target framework
-  cuda: "auto"                  # "auto"|"cpu"|"cuda-12.x"
-  deterministic: true
-  cudnn_benchmark: false
-  amp: true                     # PyTorch autocast for eligible ops
-  torch_compile: false          # set true if you want torch.compile
-  seed: 1337
-  workers: 8
-  pin_memory: true
-  grad_accum_steps: 1
+  pytorch: "2.8.0"
+  cudnn_deterministic: true
+  torch_compile: false           # keep False by default; enable per-run if needed
+  seed: 12345
+  log_dir: "./runs"
+  device: "auto"
+
+preprocess:
+  image_size:
+    h: 704                       # multiple of 32; ~16:9 letterbox to 704x1248
+    w: 1248
+    align32: true
+    letterbox: true
+    letterbox_color: [0, 0, 0]
+  fps_assumed: 24                # used to convert ms→frame indices when metadata missing
+  temporal_windows_ms:           # windows used by ring buffer, dataset slicing, and tests
+    pre_ms: 1500                 # ~1.2 s before SHOOT
+    fire_ms: 600                 # around SHOOT (~1.5 s in your example)
+    post_ms: 2100                # ≥1.7 s after HIT to let COOLCURVE decide kill
+  slice_strategy: "freeze_and_slice"   # runtime/video_ring uses this to carve (pre,fire,post)
+  normalize:
+    rgb_mean: [0.485, 0.456, 0.406]
+    rgb_std:  [0.229, 0.224, 0.225]
+    ir_mean:  [0.5]
+    ir_std:   [0.25]
+  kinematics:
+    standardize: true
+    deltas: true                 # build Δ features between the 3 key instants (pre/fire/post)
+  multiples_of_32: true
+
+labels:
+  # JSONL provides absolute times (ms) for SHOOT, optional HIT, optional KILL.
+  # Derived binary labels (per-clip) follow: kill ⊆ hit ⊆ shoot.
+  fields:
+    shoot_ms_key: "shoot_ms"
+    hit_ms_key:   "hit_ms"       # may be null if miss
+    kill_ms_key:  "kill_ms"      # may be null if not kill
+  derive:
+    shoot: "shoot_ms != null"
+    hit:   "hit_ms   != null"
+    kill:  "kill_ms  != null"
+  targets:
+    hit:  {dtype: float, shape: [B, 1]}
+    kill: {dtype: float, shape: [B, 1]}
+  class_id:
+    enabled: true
+    key: "target.class_id"
+    embedding_dim: 32
+    confidence_key: "target.class_conf"   # optional
+
+data:
+  sources:
+    jsonl_path: "/mnt/data/veo3_runs.jsonl"    # user-provided
+    video_root: "/mnt/data"                    # base folder for .mp4/.avi if relative in JSONL
+  dataset:
+    class: "data.dataset.VideoJsonlDataset"    # NEW: Copilot must implement/extend to support clips
+    mode: "video"                              # "video" | "frames" | "video_or_frames"
+    clip_sampler:
+      use_jsonl_times: true
+      window_from_times: ["pre_ms","fire_ms","post_ms"]   # uses preprocess.temporal_windows_ms
+      # fallback: if JSONL lacks exact times, derive with fps_assumed + heuristics
+    fields_map:
+      # JSONL example keys (adjust to your schema)
+      video_path_key: "video.path"             # absolute or relative to data.sources.video_root
+      rgb_path_key:   "video.rgb_path"         # optional separate stream
+      ir_path_key:    "video.ir_path"          # optional; if absent, derive IR from RGB or skip
+      kinematics_key: "radar.kinematics"       # array of 3x9 near (pre,fire,post)
+      prompt_key:     "prompt"                 # ignored by training; stored in meta
+      target_box_key: "target.bbox"            # optional GT for detector warmup
+    transforms:
+      class: "data.transforms.AlbuStereoClip"  # NEW: synchronized RGB/IR augmentations
+      rgb:
+        - name: "RandomBrightnessContrast"; p: 0.3; brightness_limit: 0.2; contrast_limit: 0.2
+        - name: "HueSaturationValue"; p: 0.2; hue_shift_limit: 8; sat_shift_limit: 12; val_shift_limit: 12
+        - name: "MotionBlur"; p: 0.1; blur_limit: 5
+        - name: "JPEGCompression"; p: 0.15; quality_lower: 70; quality_upper: 95
+        - name: "HorizontalFlip"; p: 0.5
+      ir:
+        - name: "CLAHE"; p: 0.2; clip_limit: 2.0; tile_grid_size: [8, 8]
+        - name: "GaussNoise"; p: 0.2; var_limit: [10.0, 40.0]
+      temporal:
+        jitter_frames: 1         # ±1 frame random shift per segment, synced across modalities
+        dropout_frames_p: 0.05   # randomly drop a frame in T (masked; keeps tensor shape)
+    ring_buffer:
+      class: "data.video_ring.VideoRing"
+      seconds_capacity: 6
+      fps_hint: 24
+
+  loader:
+    batch_size: 2
+    num_workers: 4
+    pin_memory: true
+    prefetch_factor: 2
+    collate_fn: "data.collate.pad_tracks_collate"  # for variable track counts from T-branch
+
+  synthetic:
+    enabled: true
+    class: "data.synthetic.SyntheticVideoJsonl"
+    count: 64
+    clip_seconds: 3.6
+    ensure_hit_rate: 0.5
+    ensure_kill_given_hit: 0.6
+
+inputs_shapes:        # authoritative shapes for tests
+  rgb: {shape: [B, 3, T, 704, 1248]}
+  ir:  {shape: [B, 1, T, 704, 1248]}
+  kin: {shape: [B, 3, 9]}        # (pre, fire, post) × 9
+  class_id: {shape: [B], dtype: long}
+
+components:
+
+  trident_i:
+    # I1: 3D encoder for RGB clips (variable T)
+    i1:
+      name: "VideoFrag3Dv2"
+      class: "trident_i.videox3d.VideoFrag3Dv2"   # NEW file
+      in_channels: 3
+      base_channels: 32
+      depth: 3
+      temporal_kernel: 3
+      temporal_stride: 2
+      use_se: false
+      norm: "group"
+      act: "gelu"
+      out_embed_dim: 512          # zi_i1
+      outputs:
+        mask_seq: {shape: [B, T, 1, 704, 1248]}
+        zi:       {shape: [B, 512]}
+      losses:
+        seg_bce: {weight: 0.5}
+        seg_dice: {weight: 0.5}
+      events: {enabled: true, threshold: 0.5}
+
+    # I2: Siamese change detector on representative pre/post frames (auto-picked around hit_ms)
+    i2:
+      name: "DualVisionV2"
+      class: "trident_i.dualvision_v2.DualVisionV2"  # NEW file
+      encoder_backbone: "efficientnet_b0"
+      transformer:
+        d_model: 256
+        n_heads: 4
+        n_layers: 2
+        mlp: 256
+        dropout: 0.1
+      out_embed_dim: 256            # zi_i2
+      frame_picker: "around_hit"    # choose representative pre/post via saliency/time proximity
+      outputs:
+        change_mask:     {shape: [B, 1, 704, 1248]}
+        integrity_delta: {shape: [B, 1]}
+        zi:              {shape: [B, 256]}
+      events: {enabled: true, threshold: 0.4}
+
+  trident_t:
+    # T1: IR anchor-free detector + light tracker over variable T
+    t1:
+      name: "PlumeDetXL"
+      class: "trident_t.ir_dettrack_v2.PlumeDetXL"   # NEW file (upgrade of PlumeDetLite)
+      in_channels: 1
+      backbone:
+        type: "lite_cnn"
+        width: 128
+        depth: 3
+        fpn: true
+      heads:
+        heatmap_thr: 0.45
+        max_dets_per_frame: 24
+      tracker:
+        type: "nearest"        # simple association for T=short; OK for synthetic
+        max_tracks: 16
+        max_frame_gap: 1
+      pool_to_embed: 256       # zt_t1
+      outputs:
+        tracks: "List[Track]"  # variable per B; collate pads
+        zt: {shape: [B, 256]}
+      events: {enabled: true}
+
+    # T2: Cooling-curve analyzer (accepts variable-length per-track curves)
+    t2:
+      name: "CoolCurve3"
+      class: "trident_t.coolcurve3.CoolCurve3"       # reuse; extend to variable T
+      track_limit: 10
+      hidden_dim: 128
+      outputs:
+        tau_hat: {shape: [B, 1]}
+        debris_vs_flare: {shape: [B, 2]}
+        zt: {shape: [B, 256]}     # zt_t2
+      events: {enabled: true}
+
+  trident_r:
+    r1:
+      name: "KineFeat"
+      class: "trident_r.kinefeat.KineFeat"
+      out_dim: 24
+      outputs:
+        r_feats: {shape: [B, 24]}
+    r2:
+      name: "GeoMLP"
+      class: "trident_r.geomlp.GeoMLP"
+      in_dim: 69
+      out_dim: 192
+      outputs:
+        zr2: {shape: [B, 192]}
+    r3:
+      name: "TinyTempoFormer"
+      class: "trident_r.tiny_temporal_former.TinyTempoFormer"
+      tokens: 3
+      token_dim: 32
+      out_dim: 192
+      outputs:
+        zr3: {shape: [B, 192]}
+
+  fusion_guard:
+    f2:
+      name: "CrossAttnFusion"
+      class: "fusion_guard.cross_attn_fusion.CrossAttnFusion"
+      d_model: 512
+      n_layers: 3
+      n_heads: 8
+      mlp: 256
+      dropout: 0.1
+      # Embedding dims fed into fusion:
+      dims:
+        zi: 768     # 512 (i1) + 256 (i2)
+        zt: 512     # 256 (t1) + 256 (t2)
+        zr: 384     # 192 (r2) + 192 (r3)
+        e_cls: 32
+      outputs:
+        z_fused: {shape: [B, 512]}
+        p_hit:   {shape: [B, 1]}
+        p_kill:  {shape: [B, 1]}
+        attn_maps: "List[Tensor]"
+        top_events: "List[EventToken]"
+      loss:
+        bce_hit: 1.0
+        bce_kill: 1.0
+        brier:    0.25
+        hierarchy_regularizer:
+          # Encourage p_kill <= p_hit by penalizing (p_kill - p_hit)+
+          weight: 0.2
+      metrics:
+        - {name: "AUROC_hit",  type: "auroc", task: "binary"}
+        - {name: "AUROC_kill", type: "auroc", task: "binary"}
+        - {name: "F1_hit",     type: "f1",    task: "binary", threshold: 0.5}
+        - {name: "F1_kill",    type: "f1",    task: "binary", threshold: 0.5}
+        - {name: "ECE_hit",    type: "ece",   bins: 15, norm: "l1"}
+        - {name: "ECE_kill",   type: "ece",   bins: 15, norm: "l1"}
+
+    f1:
+      name: "CalibGLM"
+      class: "fusion_guard.calib_glm.CalibGLM"
+      in_dim: 1696    # 768 + 512 + 384 + 32
+      model: "logreg"
+      c: 1.0
+      max_iter: 200
+      outputs:
+        p_hit_aux: {shape: [B, 1]}
+        p_kill_aux:{shape: [B, 1]}
+
+    s:
+      name: "SpoofShield"
+      class: "fusion_guard.spoof_shield.SpoofShield"
+      consistency_dt_ms: 80
+      spatial_plausibility:
+        enable: true
+        max_elev_deg: 85.0
+      class_priors:
+        enable: true
+        strength: 0.5
+      outputs:
+        p_hit_masked:  {shape: [B, 1]}
+        p_kill_masked: {shape: [B, 1]}
+        spoof_risk:    {shape: [B, 1]}
+        gates: "Dict[str,float]"
+        rationale: "Dict"
+
+  xai_text:
+    oneliner:
+      class: "xai_text.templater.Templater"
+      template: |
+        Outcome summary — hit: {p_hit_masked:.2f}, kill: {p_kill_masked:.2f}. Key events: {events}.
+    reporter:
+      class: "xai_text.small_llm_reporter.SmallLLMReporter"
+      enabled: false     # interface stub; queue it asynchronously when enabled
+
+fusion:
+  concat:
+    zi: ["trident_i.i1.zi", "trident_i.i2.zi"]         # 512 + 256 = 768
+    zt: ["trident_t.t1.zt", "trident_t.t2.zt"]         # 256 + 256 = 512
+    zr: ["trident_r.r2.zr2", "trident_r.r3.zr3"]       # 192 + 192 = 384
+  class_embed:
+    from_class_id: true
+    dim: 32
+
+training:
+  optimizer:
+    type: "adamw"
+    lr: 2.0e-4
+    weight_decay: 0.05
+    betas: [0.9, 0.999]
+  scheduler:
+    type: "cosine"
+    warmup_epochs: 2
+    min_lr: 2.0e-6
+  amp: true
   grad_clip_norm: 1.0
-
-env:
-  # Pin core libs expected by the codebase (adjust as needed)
-  pip:
-    - torch==2.8.0
-    - torchvision==0.20.0
-    - torchmetrics==1.4.0
-    - timm==1.0.9
-    - opencv-python==4.10.0.84
-    - numpy==2.0.1
-    - scipy==1.13.1
-    - scikit-learn==1.5.1
-    - pandas==2.2.2
-    - pyyaml==6.0.2
-    - tqdm==4.66.4
-    - rich==13.7.1
-    - albumentations==1.4.11
-    - shap==0.46.0
-    - captum==0.7.0
-    - optuna==3.6.1
-    - onnx==1.16.1
-    - onnxruntime==1.18.0
-    - fastapi==0.111.1
-    - uvicorn==0.30.3
-    - typer==0.12.3
-    - pydantic==2.8.2
-    - joblib==1.4.2
-
-paths:
-  data_root: ./data
-  runs_root: ./runs
-  ckpt_root: ./checkpoints
-  hparam_root: ./runs/hparam
-  logs_root: ./logs
-  reports_root: ./reports
-  export_root: ./export
-
-logging:
-  backend: "tensorboard"        # "tensorboard"|"wandb"|"none"
-  project: "trident-net"
-  flush_steps: 50
-  save_artifacts: true
-
-checkpointing:
-  policy:
+  ema:
+    enabled: false
+  checkpoints:
+    dir: "./checkpoints"
     save_last: true
     save_best: true
     top_k: 3
-    monitor: "auroc_kill"
-    mode: "max"
-  naming:
-    pattern: "{component}_{epoch:03d}_{monitor:.4f}.pt"
-    best_symlink: "{component}_best.pt"
-    last_symlink: "{component}_last.pt"
+  logging:
+    backend: "tensorboard"   # or "wandb"
+    interval_steps: 20
+  epochs:
+    pretrain_branches: 2
+    train_fusion: 3
 
-#
-# ──────────────────────────────────────────────────────────────────────────────
-# PREPROCESS / INPUT SPECS
-# ──────────────────────────────────────────────────────────────────────────────
-preprocess:
-  image:
-    # Native sensors: 1100 x 760 (W x H). Letterbox-pad to /32 dims for CNNs.
-    native_wh: [1100, 760]
-    mode: "letterbox"
-    target_hw: [768, 1120]      # H, W
-    keep_aspect: true
-    border_value_rgb: [0, 0, 0]
-    normalize: "imagenet"       # or "per-sensor"
-    to_float32: true
-  thermal:
-    normalize: "zscore"
-    clip_range: [0.0, 1.0]
-  video:
-    ring_buffer_sec: 6
-    fps_hint: 30
-  frame_selector:
-    # relative to trigger timestamp; fallback to nearest if missing
-    pre_ms: -150
-    fire_ms: 0
-    post_ms: 150
-    tolerate_missing: true
-  kinematics:
-    order: ["x","y","z","vx","vy","vz","range","bearing","elevation"]
-    normalize: "standard"       # z-score by dataset stats
-    deltas: true
-
-# Optional external metadata (soft conditioning)
-metadata:
-  target_class:
-    enabled: true
-    classes: ["Unknown","Missile","Drone","Plane","Jet","Heli","UAV","Other"]
-    embedding_dim: 32
-    dropout_p: 0.3               # class-dropout during train for robustness
-    noise_flip_p: 0.1            # random mislabel to avoid overreliance
-
-#
-# ──────────────────────────────────────────────────────────────────────────────
-# DATASETS / LOADERS
-# ──────────────────────────────────────────────────────────────────────────────
-datasets:
-  train:
-    type: multimodal
-    path: ${paths.data_root}/train
-    mode: "video_or_frames"      # "video"|"frames"|"video_or_frames"
-    shuffle: true
-    batch_size: 4
-    shapes:
-      rgb_seq: "B x 3 x 3 x 768 x 1120"     # (batch,time,channels,H,W)
-      ir_seq:  "B x 3 x 1 x 768 x 1120"
-      k_seq:   "B x 3 x 9"
-      class_id: "B"
-      labels:  "{hit: B x 1, kill: B x 1}"
-    augment:
-      rgb:
-        - type: "HorizontalFlip"
-          p: 0.5
-        - type: "RandomBrightnessContrast"
-          p: 0.3
-          brightness_limit: 0.2
-          contrast_limit: 0.2
-        - type: "GaussianBlur"
-          p: 0.2
-          blur_limit: 3
-      ir:
-        - type: "GaussianNoise"
-          p: 0.3
-          var_limit: [1e-5, 1e-3]
-        - type: "CLAHE"
-          p: 0.2
-      sync_temporal_jitter_ms: 12
-      kinematics_noise_std: 0.01
-  val:
-    type: multimodal
-    path: ${paths.data_root}/val
-    batch_size: 4
-    shuffle: false
-  test:
-    type: multimodal
-    path: ${paths.data_root}/test
-    batch_size: 4
-    shuffle: false
-
-sampler:
-  train:
-    balance_labels: true
-    replacement: false
-
-#
-# ──────────────────────────────────────────────────────────────────────────────
-# COMPONENTS (MODELS & TOOLS)
-# ──────────────────────────────────────────────────────────────────────────────
-components:
-
-  # ── TRIDENT-I (RGB, 3 frames)
-  i1:
-    class: trident_i.Frag3D
-    kind: 3d_unet_segmentation
-    description: 3D encoder-decoder over 3 RGB frames; debris/flash-like masks + pooled embedding.
-    inputs:
-      rgb_seq: {shape: "B x 3 x 3 x 768 x 1120", dtype: float32}
-    outputs:
-      mask_seq: {shape: "B x 3 x 1 x 768 x 1120", dtype: float32}
-      zi: {shape: "B x 256", dtype: float32}
-      events: {type: list}
-    arch:
-      levels: 3
-      base_channels: 32
-      bottleneck_dim: 256
-      norm: group
-      activation: gelu
-
-  i2:
-    class: trident_i.FlashNetV
-    kind: saliency_temporal
-    description: Per-frame 2D backbone (shared) + temporal conv (k=3) for short spikes.
-    inputs:
-      rgb_seq: {shape: "B x 3 x 3 x 768 x 1120", dtype: float32}
-    outputs:
-      saliency_seq: {shape: "B x 3 x 1 x 768 x 1120", dtype: float32}
-      zi: {shape: "B x 256", dtype: float32}
-      events: {type: list}
-    arch:
-      backbone: convnext_tiny
-      temporal_kernel: 3
-      out_dim: 256
-      dropout: 0.1
-
-  i3:
-    class: trident_i.DualVision
-    kind: siamese_change
-    description: Siamese encoder on pre/post RGB; correlation + tiny transformer.
-    inputs:
-      rgb_pre:  {shape: "B x 3 x 768 x 1120", dtype: float32}
-      rgb_post: {shape: "B x 3 x 768 x 1120", dtype: float32}
-    outputs:
-      change_mask: {shape: "B x 1 x 768 x 1120", dtype: float32}
-      integrity_delta: {shape: "B x 1", dtype: float32}
-      zi: {shape: "B x 256", dtype: float32}
-      events: {type: list}
-    arch:
-      encoder: efficientnet_b0
-      transformer_heads: 4
-      transformer_layers: 2
-      out_dim: 256
-
-  # ── TRIDENT-T (IR/Thermal, 3 frames)
-  t1:
-    class: trident_t.PlumeDetLite
-    kind: detect_track_3frame
-    description: Tiny anchor-free detector per IR frame + simple association (3 frames).
-    inputs:
-      ir_seq: {shape: "B x 3 x 1 x 768 x 1120", dtype: float32}
-    outputs:
-      tracks: {type: "list[track]"}
-      zt: {shape: "B x 256", dtype: float32}
-      events: {type: list}
-    arch:
-      det_backbone: "lite"
-      head: "anchor_free"
-      max_tracks: 10
-      out_dim: 256
-
-  t2:
-    class: trident_t.CoolCurve3
-    kind: temporal_curve_classifier
-    description: 3-point decay fit + MLP over per-track intensity/area curves (pooled).
-    inputs:
-      curves: {shape: "B x 10 x 3", dtype: float32}
-      areas:  {shape: "B x 10 x 3", dtype: float32}
-      pad_mask: {shape: "B x 10", dtype: bool}
-    outputs:
-      tau_hat: {shape: "B x 1", dtype: float32}
-      debris_vs_flare: {shape: "B x 2", dtype: float32}
-      zt: {shape: "B x 256", dtype: float32}
-      events: {type: list}
-    arch:
-      use_log_linear_fit: true
-      mlp_hidden: 128
-      out_dim: 256
-
-  # ── TRIDENT-R (Kinematics, 3 time steps)
-  r1:
-    class: trident_r.KineFeat
-    kind: physics_features
-    description: Deterministic physical features from kinematics (LOS, closing speed, angle rates, Δrange).
-    inputs:
-      k_seq: {shape: "B x 3 x 9", dtype: float32}
-    outputs:
-      r_feats: {shape: "B x 24", dtype: float32}
-      events: {type: list}
-    features:
-      - los_vector_norm
-      - range_rate
-      - closing_speed
-      - angle_rate_bearing
-      - angle_rate_elevation
-      - lateral_miss_proxy
-      - accel_estimates
-
-  r2:
-    class: trident_r.GeoMLP
-    kind: mlp_embedding
-    description: Learned embedding on concatenated raw & delta kinematics plus r1 features.
-    inputs:
-      k_aug: {shape: "B x 69", dtype: float32, note: "concat[k0,k1,k2, Δk01,Δk12, r_feats] => 27+18+24=69"}
-    outputs:
-      zr2: {shape: "B x 192", dtype: float32}
-      events: {type: list}
-    arch:
-      hidden: [128, 192]
-      norm: layer
-      activation: gelu
-      dropout: 0.05
-
-  r3:
-    class: trident_r.TinyTempoFormer
-    kind: temporal_transformer
-    description: 2-layer transformer over 3 tokenized steps (project per-step to 32-D tokens).
-    inputs:
-      k_tokens: {shape: "B x 3 x 32", dtype: float32}
-    outputs:
-      zr3: {shape: "B x 192", dtype: float32}
-      events: {type: list}
-    arch:
-      d_model: 192
-      n_heads: 4
-      n_layers: 2
-      token_dim: 32
-      dropout: 0.1
-
-  # ── FUSION + GUARD
-  f2:
-    class: fusion_guard.CrossAttnFusion
-    kind: transformer_fusion_multitask
-    description: Cross-modal transformer; outputs p_hit/p_kill + attention maps + top events.
-    inputs:
-      zi: {shape: "B x 768", dtype: float32, note: "i1.zi=256 + i2.zi=256 + i3.zi=256"}
-      zt: {shape: "B x 512", dtype: float32, note: "t1.zt=256 + t2.zt=256"}
-      zr: {shape: "B x 384", dtype: float32, note: "r2.zr2=192 + r3.zr3=192"}
-      class_emb: {shape: "B x 32", dtype: float32, optional: true}
-      events: {type: list}
-    outputs:
-      z_fused: {shape: "B x 512", dtype: float32}
-      p_hit:   {shape: "B x 1", dtype: float32}
-      p_kill:  {shape: "B x 1", dtype: float32}
-      attn_maps: {type: dict}
-      top_events: {type: list}
-    arch:
-      d_model: 512
-      n_heads: 8
-      n_layers: 3
-      mlp_hidden: 256
-      dropout: 0.1
-      class_conditioning: "concat"    # "concat" | "token"
-    loss:
-      hit:  {type: bce, weight: 1.0}
-      kill: {type: bce, weight: 1.0}
-      calibration: {type: brier, weight: 0.2}
-    metrics: [auroc_hit, auroc_kill, f1_hit, f1_kill, brier, ece]
-
-  f1:
-    class: fusion_guard.CalibGLM
-    kind: classical_baseline
-    description: Logistic baseline on detached features; used for calibration/drift/guard cross-checks.
-    inputs:
-      features: {shape: "B x 1696", dtype: float32, note: "zi(768)+zt(512)+zr(384)+class_emb(32)"}
-    outputs:
-      p_hit_aux:  {shape: "B x 1", dtype: float32}
-      p_kill_aux: {shape: "B x 1", dtype: float32}
-    config:
-      model: "logreg"   # or "xgboost"
-      regularization: l2
-      c: 1.0
-
-  s:
-    class: fusion_guard.SpoofShield
-    kind: guard_plausibility
-    description: Cross-modal timing/physics plausibility checks; gates final probabilities; outputs risk/rationale.
-    inputs:
-      p_hit:  {shape: "B x 1", dtype: float32}
-      p_kill: {shape: "B x 1", dtype: float32}
-      events: {type: list}
-      geom:   {type: dict, keys: [bearing,elevation]}
-      priors: {type: dict}
-      class_id: {shape: "B", dtype: int32, optional: true}
-      class_conf: {shape: "B x 1", dtype: float32, optional: true}
-    outputs:
-      p_hit_masked:  {shape: "B x 1", dtype: float32}
-      p_kill_masked: {shape: "B x 1", dtype: float32}
-      spoof_risk:    {shape: "B x 1", dtype: float32}
-      gates:         {type: dict}
-      explanation:   {type: dict}
-    config:
-      consistency_dt_ms: 80
-      tau_bounds: [0.05, 0.6]
-      require_postframe_evidence: true
-      class_prior_strength: 0.5       # scaled by class_conf if provided
-
-  # ── EXPLAINABILITY (text)
-  xai_oneliner:
-    class: xai_text.Templater
-    config:
-      type: "templater"                # "templater" | "microlm"
-      latency_ms_budget: 20
-      templates_path: ./configs/oneliner_templates.yaml
-      # If you switch to micro-LM:
-      # model: "distilled-seq2seq-tiny"
-      # quantization: "int8-dynamic"
-
-  xai_reporter:
-    class: xai_text.SmallLLMReporter
-    config:
-      model: "tinyllama-1.1b-report"  # placeholder; swap to your CPU-quantized LLM
-      quantization: "int8-static"
-      max_tokens: 256
-      temperature: 0.1
-      template_path: ./configs/report_template.md
-      prompt_schema: ./configs/report_schema.json
-
-  # ── ANALYTICS (optional classical helpers)
-  miner_clusters:
-    class: analytics.ClusterMiner
-    config:
-      algo: "kmeans"
-      n_clusters: 8
-      inputs: ["zr","zi","zt"]         # features to cluster
-      save_to: ${paths.runs_root}/clusters.pkl
-
-  miner_rules:
-    class: analytics.RuleMiner
-    config:
-      algo: "apriori"
-      min_support: 0.1
-      min_confidence: 0.8
-      from_events: true
-      save_to: ${paths.runs_root}/rules.json
-
-#
-# ──────────────────────────────────────────────────────────────────────────────
-# HYPERPARAMETER TUNING
-# ──────────────────────────────────────────────────────────────────────────────
 hparam_search:
-  f2:
-    engine: "optuna"
-    n_trials: 40
-    direction: "maximize"
-    metric: "f1_kill"
-    space:
-      lr:        {type: loguniform, low: 1e-5, high: 5e-4}
-      dropout:   {type: uniform,    low: 0.0,  high: 0.3}
-      n_layers:  {type: int,        low: 2,    high: 5}
-      n_heads:   {type: choice,     values: [4, 8]}
-      mlp_hidden: {type: choice,     values: [192, 256, 384]}
-  i1:
-    engine: "optuna"
-    n_trials: 20
-    direction: "maximize"
-    metric: "f1_hit"
-    space:
-      base_channels: {type: choice, values: [24, 32, 48]}
-      bottleneck_dim: {type: choice, values: [128, 256, 320]}
-      lr:            {type: loguniform, low: 1e-5, high: 3e-4}
-  t1:
-    engine: "optuna"
-    n_trials: 20
-    direction: "maximize"
-    metric: "f1_hit"
-    space:
-      max_tracks: {type: choice, values: [6, 8, 10]}
-      lr:         {type: loguniform, low: 1e-5, high: 3e-4}
+  engine: "optuna"
+  study_name: "trident_clip_hparams"
+  n_trials: 16
+  directions: ["maximize"]
+  spaces:
+    training.optimizer.lr:     {low: 1.0e-5, high: 5.0e-4, log: true}
+    training.grad_clip_norm:   {low: 0.5, high: 2.0}
+    fusion_guard.f2.loss.hierarchy_regularizer.weight: {low: 0.05, high: 0.5}
+    trident_t.t1.heads.heatmap_thr: {low: 0.35, high: 0.6}
 
-#
-# ──────────────────────────────────────────────────────────────────────────────
-# TASKS
-# ──────────────────────────────────────────────────────────────────────────────
-tasks:
+runtime:
+  registry:
+    # map strings → classes; Copilot must ensure these exist/updated
+    - "data.dataset.VideoJsonlDataset"
+    - "data.transforms.AlbuStereoClip"
+    - "data.video_ring.VideoRing"
+    - "trident_i.videox3d.VideoFrag3Dv2"
+    - "trident_i.dualvision_v2.DualVisionV2"
+    - "trident_t.ir_dettrack_v2.PlumeDetXL"
+    - "trident_t.coolcurve3.CoolCurve3"
+    - "trident_r.kinefeat.KineFeat"
+    - "trident_r.geomlp.GeoMLP"
+    - "trident_r.tiny_temporal_former.TinyTempoFormer"
+    - "fusion_guard.cross_attn_fusion.CrossAttnFusion"
+    - "fusion_guard.calib_glm.CalibGLM"
+    - "fusion_guard.spoof_shield.SpoofShield"
+    - "xai_text.templater.Templater"
+    - "xai_text.small_llm_reporter.SmallLLMReporter"
 
-  # ── Preprocessing stats
-  compute_norm_stats:
-    run: preprocess_stats
-    dataset: train
-    outputs:
-      image_stats: ${paths.runs_root}/image_stats.json
-      kin_stats:   ${paths.runs_root}/kin_stats.json
+  tasks:
+    # 1) Branch pretraining on synthetic or real (from JSONL)
+    pretrain_i1:
+      components: ["trident_i.i1"]
+      freeze: []
+      data_split: {train: 0.9, val: 0.1}
+    pretrain_i2:
+      components: ["trident_i.i2"]
+      freeze: []
+      data_split: {train: 0.9, val: 0.1}
+    pretrain_t1:
+      components: ["trident_t.t1"]
+      freeze: []
+      data_split: {train: 0.9, val: 0.1}
+    pretrain_t2:
+      components: ["trident_t.t2"]
+      freeze: []
+      data_split: {train: 0.9, val: 0.1}
+    pretrain_r:
+      components: ["trident_r.r2", "trident_r.r3"]
+      upstream: ["trident_r.r1"]
+      freeze: []
 
-  # ── Optional analytics (clustering / rules)
-  mine_clusters:
-    run: mine_clusters
-    component: miner_clusters
-    dataset: train
+    # 2) Fusion training (freeze branches by default)
+    train_f2:
+      components: ["fusion_guard.f2"]
+      upstream: ["trident_i.i1", "trident_i.i2", "trident_t.t1", "trident_t.t2", "trident_r.r1", "trident_r.r2", "trident_r.r3"]
+      freeze: ["trident_i.*", "trident_t.*", "trident_r.*"]
+      data_split: {train: 0.85, val: 0.15}
 
-  mine_rules:
-    run: mine_rules
-    component: miner_rules
-    dataset: train
+    # Optional classical calib
+    fit_classical:
+      components: ["fusion_guard.f1"]
+      upstream: ["fusion_guard.f2"]
+      freeze: ["*"]
 
-  # ── Pretrain branches
-  pretrain_i1:
-    run: train
-    component: i1
-    dataset: train
-    val: val
-    optimizer: {name: adamw, lr: 3e-4, wd: 0.05}
-    scheduler: {name: cosine, warmup_epochs: 2}
-    epochs: 40
-    save_to: ${paths.ckpt_root}/i1.pt
+    # 3) Final train: merge train+val using best HPs; export artifacts
+    finaltrain:
+      components: ["fusion_guard.f2"]
+      freeze: ["trident_i.*", "trident_t.*", "trident_r.*"]
+      use_best_hparams: true
+      merge_train_val: true
+      export_after: true
 
-  pretrain_i2:
-    run: train
-    component: i2
-    dataset: train
-    val: val
-    optimizer: {name: adamw, lr: 3e-4}
-    scheduler: {name: cosine, warmup_epochs: 2}
-    epochs: 30
-    save_to: ${paths.ckpt_root}/i2.pt
-
-  pretrain_i3:
-    run: train
-    component: i3
-    dataset: train
-    val: val
-    optimizer: {name: adamw, lr: 3e-4}
-    scheduler: {name: cosine, warmup_epochs: 2}
-    epochs: 35
-    save_to: ${paths.ckpt_root}/i3.pt
-
-  pretrain_t1:
-    run: train
-    component: t1
-    dataset: train
-    val: val
-    optimizer: {name: adamw, lr: 2e-4}
-    scheduler: {name: cosine, warmup_epochs: 2}
-    epochs: 35
-    save_to: ${paths.ckpt_root}/t1.pt
-
-  pretrain_t2:
-    run: train
-    component: t2
-    dataset: train
-    val: val
-    inputs_from: [t1]                     # uses tracks to build curves
-    optimizer: {name: adamw, lr: 2e-4}
-    scheduler: {name: cosine, warmup_epochs: 2}
-    epochs: 30
-    save_to: ${paths.ckpt_root}/t2.pt
-
-  # ── R-branch
-  precompute_r1:
-    run: featureize
-    component: r1
-    dataset: train
-    val: val
-    save_to: ${paths.ckpt_root}/r1_feats.npz
-
-  pretrain_r2:
-    run: train
-    component: r2
-    dataset: train
-    val: val
-    inputs_from: [r1]
-    optimizer: {name: adamw, lr: 2e-4}
-    scheduler: {name: cosine, warmup_epochs: 2}
-    epochs: 35
-    save_to: ${paths.ckpt_root}/r2.pt
-
-  pretrain_r3:
-    run: train
-    component: r3
-    dataset: train
-    val: val
-    inputs_from: [r1]
-    optimizer: {name: adamw, lr: 2e-4}
-    scheduler: {name: cosine, warmup_epochs: 2}
-    epochs: 35
-    save_to: ${paths.ckpt_root}/r3.pt
-
-  # ── Hyperparameter tuning
-  tune_i1:
-    run: hparam_tune
-    component: i1
-    dataset: train
-    val: val
-    search: ${hparam_search.i1}
-    export_best: ${paths.hparam_root}/i1_best.json
-
-  tune_f2:
-    run: hparam_tune
-    component: f2
-    dataset: train
-    val: val
-    search: ${hparam_search.f2}
-    export_best: ${paths.hparam_root}/f2_best.json
-
-  tune_t1:
-    run: hparam_tune
-    component: t1
-    dataset: train
-    val: val
-    search: ${hparam_search.t1}
-    export_best: ${paths.hparam_root}/t1_best.json
-
-  # ── Fusion training (with best HPs where available)
-  train_f2:
-    run: train_fusion
-    component: f2
-    freeze: [i1, i2, i3, t1, t2, r2, r3]
-    dataset: train
-    val: val
-    optimizer: {name: adamw, lr: 1.5e-4}
-    scheduler: {name: cosine, warmup_epochs: 2}
-    epochs: 40
-    save_to: ${paths.ckpt_root}/f2.pt
-
-  train_with_best_f2:
-    run: train_fusion
-    component: f2
-    freeze: [i1, i2, i3, t1, t2, r2, r3]
-    dataset: train
-    val: val
-    load_hparams: ${paths.hparam_root}/f2_best.json
-    optimizer: {name: adamw}
-    scheduler: {name: cosine, warmup_epochs: 2}
-    epochs: 40
-    save_to: ${paths.ckpt_root}/f2.pt
-
-  # ── Calib baseline
-  train_f1:
-    run: fit_classical
-    component: f1
-    features_from: [i1, i2, i3, t1, t2, r2, r3]
-    dataset: train
-    val: val
-    save_to: ${paths.ckpt_root}/f1.joblib
-
-  # ── Guard calibration
-  calibrate_s:
-    run: calibrate_guard
-    component: s
-    dataset: val
-    inputs_from: [f2, f1]
-    save_to: ${paths.ckpt_root}/s.pt
-
-  # ── XAI language modules
-  train_xai_reporter:
-    run: train_llm
-    component: xai_reporter
-    dataset: ${paths.data_root}/reports_train.jsonl
-    val: ${paths.data_root}/reports_val.jsonl
-    quantize: true
-    epochs: 3
-    save_to: ${paths.ckpt_root}/xai_reporter.gguf
-
-  # ── Evaluation
-  eval_joint:
-    run: evaluate
-    components: [i1, i2, i3, t1, t2, r2, r3, f2, f1, s]
-    dataset: test
-    metrics: [auroc_hit, auroc_kill, f1_hit, f1_kill, brier, ece]
-    report_to: ${paths.runs_root}/eval.json
-
-  # ── Export (TorchScript/ONNX)
-  export_fusion_onnx:
-    run: export
-    component: f2
-    format: "onnx"
-    opset: 18
-    output: ${paths.export_root}/f2.onnx
-
-  export_guard_torchscript:
-    run: export
-    component: s
-    format: "torchscript"
-    output: ${paths.export_root}/s.ts
-
-  # ── Inference / serving with trigger and background report
   infer_realtime:
-    run: serve
     graph:
-      order: [i1, i2, i3, t1, t2, r1, r2, r3, f2, f1, s, xai_oneliner]
-      trigger: "trigger"              # executes when application asserts trigger event
-      video_input: true
-      ring_buffer_sec: ${preprocess.video.ring_buffer_sec}
-      outputs: [p_hit_masked, p_kill_masked, spoof_risk, oneliner, attn_maps, top_events]
-      queue_report_to: xai_reporter   # enqueue full report generation (non-blocking)
-    checkpoint_map:
-      i1: ${paths.ckpt_root}/i1.pt
-      i2: ${paths.ckpt_root}/i2.pt
-      i3: ${paths.ckpt_root}/i3.pt
-      t1: ${paths.ckpt_root}/t1.pt
-      t2: ${paths.ckpt_root}/t2.pt
-      r2: ${paths.ckpt_root}/r2.pt
-      r3: ${paths.ckpt_root}/r3.pt
-      f2: ${paths.ckpt_root}/f2.pt
-      f1: ${paths.ckpt_root}/f1.joblib
-      s:  ${paths.ckpt_root}/s.pt
-      xai_oneliner: ${paths.ckpt_root}/xai_oneliner.pt
-      xai_reporter: ${paths.ckpt_root}/xai_reporter.gguf
+      order:
+        - "video_ring.capture"
+        - "video_ring.freeze_and_slice"     # uses preprocess.temporal_windows_ms
+        - "trident_i.i1"
+        - "trident_i.i2"
+        - "trident_t.t1"
+        - "trident_t.t2"
+        - "trident_r.r1"
+        - "trident_r.r2"
+        - "trident_r.r3"
+        - "fusion_guard.f2"
+        - "fusion_guard.s"
+        - "xai_text.oneliner"
+      triggers:
+        on_event: "user_trigger"            # e.g., external “fire” signal or threshold
+      returns:
+        - "p_hit_masked"
+        - "p_kill_masked"
+        - "spoof_risk"
+        - "oneliner"
+        - "top_events"
+        - "attn_maps"
 
-#
-# ──────────────────────────────────────────────────────────────────────────────
-# PIPELINES
-# ──────────────────────────────────────────────────────────────────────────────
-pipelines:
+eval:
+  batch_size: 4
+  save_report: "./runs/eval_report.json"
+  curves:
+    reliability_bins: 15
+    roc: true
+    pr:  true
 
-  # Normal mode: split train/val/test + tuning + eval
-  normal:
-    steps:
-      - compute_norm_stats
-      - mine_clusters
-      - mine_rules
-      - pretrain_i1
-      - pretrain_i2
-      - pretrain_i3
-      - pretrain_t1
-      - pretrain_t2
-      - precompute_r1
-      - pretrain_r2
-      - pretrain_r3
-      - tune_i1
-      - tune_t1
-      - tune_f2
-      - train_with_best_f2
-      - train_f1
-      - calibrate_s
-      - train_xai_reporter
-      - eval_joint
-      - export_fusion_onnx
-      - export_guard_torchscript
+export:
+  onnx:
+    enable: true
+    module: "fusion_guard.f2"
+    path: "./exports/fusion_f2.onnx"
+    dynamic_axes:
+      input:  {0: "batch"}
+      output: {0: "batch"}
+  torchscript_guard:
+    enable: true
+    module: "fusion_guard.s"
+    path: "./exports/guard_s.pt"
 
-  # Final mode: merges train+val and retrains with best HPs over full data
-  finaltrain:
-    merge_splits: ["train","val"]   # creates "train_full"; "test" remains for last audit if present
-    steps:
-      - compute_norm_stats
-      - pretrain_i1
-      - pretrain_i2
-      - pretrain_i3
-      - pretrain_t1
-      - pretrain_t2
-      - precompute_r1
-      - pretrain_r2
-      - pretrain_r3
-      - train_with_best_f2
-      - train_f1
-      - calibrate_s
-      - train_xai_reporter
-      - export_fusion_onnx
-      - export_guard_torchscript
+tests:
+  # Hard shape checks
+  test_shapes:
+    rgb:  {expect: [2, 3, "T", 704, 1248]}
+    ir:   {expect: [2, 1, "T", 704, 1248]}
+    kin:  {expect: [2, 3, 9]}
+    zi:   {expect: [2, 768]}
+    zt:   {expect: [2, 512]}
+    zr:   {expect: [2, 384]}
+    p_hit:{expect: [2, 1]}
+    p_kill:{expect: [2, 1]}
+  dataset:
+    letterbox_multiple_of_32: true
+    synchronized_augs: true
+    temporal_jitter_ok: true
+  forward_path:
+    modules: ["trident_i.i1","trident_t.t1","trident_r.r1","fusion_guard.f2","fusion_guard.s"]
+  metrics:
+    include: ["AUROC","F1","ECE","Brier"]
