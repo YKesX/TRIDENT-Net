@@ -25,8 +25,8 @@ def test_synthetic_data_generation():
         assert key in batch, f"Missing key {key} in synthetic batch"
     
     # Verify shapes
-    assert batch['rgb_seq'].shape == (2, 3, 3, 768, 1120), "RGB sequence shape mismatch"
-    assert batch['ir_seq'].shape == (2, 3, 1, 768, 1120), "IR sequence shape mismatch"
+    assert batch['rgb_seq'].shape == (2, 3, 3, 720, 1280), f"RGB sequence shape mismatch: expected (2, 3, 3, 720, 1280), got {batch['rgb_seq'].shape}"
+    assert batch['ir_seq'].shape == (2, 3, 1, 720, 1280), f"IR sequence shape mismatch: expected (2, 3, 1, 720, 1280), got {batch['ir_seq'].shape}"
     assert batch['k_seq'].shape == (2, 3, 9), "Kinematics sequence shape mismatch"
     
     # Verify labels

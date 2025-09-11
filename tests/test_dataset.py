@@ -33,10 +33,10 @@ def test_synthetic_dataset():
     for key in expected_keys:
         assert key in sample, f"Missing key {key} in sample"
     
-    # Verify shapes
-    assert sample['rgb_seq'].shape == (3, 3, 768, 1120), "RGB sequence shape mismatch"
-    assert sample['ir_seq'].shape == (3, 1, 768, 1120), "IR sequence shape mismatch"
-    assert sample['k_seq'].shape == (3, 9), "Kinematics sequence shape mismatch"
+    # Verify shapes (using native 1280×720 from tasks.yml)
+    assert sample['rgb_seq'].shape[2:] == (720, 1280), f"RGB sequence shape mismatch: expected (720, 1280), got {sample['rgb_seq'].shape[2:]}"
+    assert sample['ir_seq'].shape[2:] == (720, 1280), f"IR sequence shape mismatch: expected (720, 1280), got {sample['ir_seq'].shape[2:]}"
+    assert sample['k_seq'].shape == (3, 9), f"Kinematics sequence shape mismatch: expected (3, 9), got {sample['k_seq'].shape}"
     
     # Verify label format
     assert 'hit' in sample['y_outcome'], "Missing hit labels"
@@ -57,14 +57,24 @@ def test_dataloader_functionality():
     print("🧪 Testing dataloader functionality...")
     
     dataset = SyntheticDataset(n_samples=8)
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=4, shuffle=True)
+    # Use the custom collate function to handle variable T
+    from trident.data.collate import pad_tracks_collate
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=4, shuffle=True, collate_fn=pad_tracks_collate)
     
     # Test batch generation
     batch = next(iter(dataloader))
     
-    # Verify batch shapes
-    assert batch['rgb_seq'].shape == (4, 3, 3, 768, 1120), "Batched RGB shape mismatch"
-    assert batch['ir_seq'].shape == (4, 3, 1, 768, 1120), "Batched IR shape mismatch"
+    # Verify batch shapes (using native 1280×720 from tasks.yml)
+    # Note: Variable T gets padded to max T in batch, so we check dimensions exist
+    assert len(batch['rgb_seq'].shape) == 5, f"RGB should be 5D [B,C,T,H,W], got shape {batch['rgb_seq'].shape}"
+    assert batch['rgb_seq'].shape[0] == 4, f"Batch size should be 4, got {batch['rgb_seq'].shape[0]}"
+    assert batch['rgb_seq'].shape[1] == 3, f"RGB channels should be 3, got {batch['rgb_seq'].shape[1]}"
+    assert batch['rgb_seq'].shape[3:] == (720, 1280), f"RGB spatial dims should be (720, 1280), got {batch['rgb_seq'].shape[3:]}"
+    
+    assert len(batch['ir_seq'].shape) == 5, f"IR should be 5D [B,C,T,H,W], got shape {batch['ir_seq'].shape}"
+    assert batch['ir_seq'].shape[0] == 4, f"Batch size should be 4, got {batch['ir_seq'].shape[0]}"
+    assert batch['ir_seq'].shape[1] == 1, f"IR channels should be 1, got {batch['ir_seq'].shape[1]}"
+    assert batch['ir_seq'].shape[3:] == (720, 1280), f"IR spatial dims should be (720, 1280), got {batch['ir_seq'].shape[3:]}"
     assert batch['k_seq'].shape == (4, 3, 9), "Batched kinematics shape mismatch"
     
     # Verify labels are properly batched
@@ -75,12 +85,12 @@ def test_dataloader_functionality():
 
 
 def test_letterbox_transforms():
-    """Test letterbox preprocessing to 768x1120."""
+    """Test letterbox preprocessing to native 720x1280."""
     print("🧪 Testing letterbox transforms...")
     
     # Test with different input sizes
     test_sizes = [(640, 480), (1100, 760), (1920, 1080)]
-    target_size = (768, 1120)  # H, W
+    target_size = (720, 1280)  # H, W - native resolution from tasks.yml
     
     for orig_w, orig_h in test_sizes:
         # Create dummy image
@@ -96,7 +106,7 @@ def test_letterbox_transforms():
             align_corners=False
         ).squeeze(0)
         
-        assert resized.shape == (3, 768, 1120), f"Letterbox failed for {orig_w}x{orig_h}"
+        assert resized.shape == (3, 720, 1280), f"Letterbox failed for {orig_w}x{orig_h}: expected (3, 720, 1280), got {resized.shape}"
     
     print("✅ Letterbox transforms test passed")
 
@@ -107,8 +117,8 @@ def test_synchronized_augmentations():
     
     # For now, just test that we can apply the same transform to RGB and IR
     batch_size = 2
-    rgb_seq = torch.randn(batch_size, 3, 3, 768, 1120)
-    ir_seq = torch.randn(batch_size, 3, 1, 768, 1120)
+    rgb_seq = torch.randn(batch_size, 3, 3, 720, 1280)
+    ir_seq = torch.randn(batch_size, 3, 1, 720, 1280)
     
     # Test horizontal flip (should be synchronized)
     flip_prob = torch.rand(batch_size) < 0.5
@@ -119,8 +129,8 @@ def test_synchronized_augmentations():
             ir_seq[i] = torch.flip(ir_seq[i], dims=[-1])   # flip width
     
     # Verify shapes are preserved
-    assert rgb_seq.shape == (batch_size, 3, 3, 768, 1120), "RGB shape changed after augmentation"
-    assert ir_seq.shape == (batch_size, 3, 1, 768, 1120), "IR shape changed after augmentation"
+    assert rgb_seq.shape == (batch_size, 3, 3, 720, 1280), f"RGB shape changed after augmentation: expected (batch_size, 3, 3, 720, 1280), got {rgb_seq.shape}"
+    assert ir_seq.shape == (batch_size, 3, 1, 720, 1280), f"IR shape changed after augmentation: expected (batch_size, 3, 1, 720, 1280), got {ir_seq.shape}"
     
     print("✅ Synchronized augmentations test passed")
 
