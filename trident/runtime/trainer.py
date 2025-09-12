@@ -50,6 +50,9 @@ class Trainer:
         self.mixed_precision = mixed_precision
         self.gradient_clip_norm = gradient_clip_norm
         
+        # Setup deterministic training if configured
+        self._setup_deterministic_training()
+        
         # Mixed precision scaler
         self.scaler = GradScaler() if mixed_precision and self.device.type == "cuda" else None
         
@@ -60,6 +63,48 @@ class Trainer:
         self.current_epoch = 0
         self.global_step = 0
         self.best_metric = None
+        
+    def _setup_deterministic_training(self):
+        """Setup deterministic training based on environment configuration."""
+        import random
+        import numpy as np
+        
+        # Get environment settings from config
+        env_config = getattr(self.config, 'environment', {})
+        if isinstance(env_config, dict):
+            seed = env_config.get('seed', 12345)
+            cudnn_deterministic = env_config.get('cudnn_deterministic', True)
+            cudnn_benchmark = env_config.get('cudnn_benchmark', False)
+        else:
+            # Fallback defaults
+            seed = 12345
+            cudnn_deterministic = True
+            cudnn_benchmark = False
+        
+        # Set seeds for reproducibility
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
+            
+        # Set deterministic algorithms
+        if hasattr(torch, 'use_deterministic_algorithms'):
+            torch.use_deterministic_algorithms(cudnn_deterministic)
+        
+        # Set cuDNN settings
+        if torch.backends.cudnn.is_available():
+            torch.backends.cudnn.deterministic = cudnn_deterministic
+            torch.backends.cudnn.benchmark = cudnn_benchmark
+            
+        self.logger.info(f"Deterministic training setup: seed={seed}, "
+                        f"cudnn_deterministic={cudnn_deterministic}, "
+                        f"cudnn_benchmark={cudnn_benchmark}")
+        
+        # Store seed for reference
+        self.seed = seed
         
     def train_single_component(
         self,
@@ -464,22 +509,47 @@ class Trainer:
             optimizer.zero_grad()
             
             total_loss = 0
-            for comp_name, component in components.items():
-                comp_config = self.config_loader.get_component_config(comp_name)
+            
+            # Forward pass with mixed precision
+            if self.scaler:
+                with autocast():
+                    for comp_name, component in components.items():
+                        comp_config = self.config_loader.get_component_config(comp_name)
+                        
+                        outputs = self._forward_single_component(component, batch, comp_config)
+                        loss = self._compute_single_loss(outputs, batch, loss_fns[comp_name], comp_config)
+                        
+                        total_loss += loss
+                        loss_meters[comp_name].update(loss.item())
                 
-                outputs = self._forward_single_component(component, batch, comp_config)
-                loss = self._compute_single_loss(outputs, batch, loss_fns[comp_name], comp_config)
+                # Backward pass
+                self.scaler.scale(total_loss).backward()
                 
-                total_loss += loss
-                loss_meters[comp_name].update(loss.item())
-            
-            total_loss.backward()
-            
-            if self.gradient_clip_norm > 0:
-                for component in components.values():
-                    torch.nn.utils.clip_grad_norm_(component.parameters(), self.gradient_clip_norm)
-            
-            optimizer.step()
+                # Gradient clipping
+                if self.gradient_clip_norm > 0:
+                    self.scaler.unscale_(optimizer)
+                    for component in components.values():
+                        torch.nn.utils.clip_grad_norm_(component.parameters(), self.gradient_clip_norm)
+                
+                self.scaler.step(optimizer)
+                self.scaler.update()
+            else:
+                for comp_name, component in components.items():
+                    comp_config = self.config_loader.get_component_config(comp_name)
+                    
+                    outputs = self._forward_single_component(component, batch, comp_config)
+                    loss = self._compute_single_loss(outputs, batch, loss_fns[comp_name], comp_config)
+                    
+                    total_loss += loss
+                    loss_meters[comp_name].update(loss.item())
+                
+                total_loss.backward()
+                
+                if self.gradient_clip_norm > 0:
+                    for component in components.values():
+                        torch.nn.utils.clip_grad_norm_(component.parameters(), self.gradient_clip_norm)
+                
+                optimizer.step()
             total_loss_meter.update(total_loss.item())
         
         metrics = {"total_loss": total_loss_meter.avg}
@@ -532,24 +602,54 @@ class Trainer:
             
             optimizer.zero_grad()
             
-            # Execute graph
-            outputs = graph.execute(batch)
-            
-            # Get fusion output
-            fusion_output = outputs.get(f"{fusion_name}_outcome")
-            if fusion_output and "y_outcome" in batch:
-                loss = loss_fn(fusion_output.p_outcome, batch["y_outcome"].float())
+            # Execute graph and compute loss with mixed precision
+            if self.scaler:
+                with autocast():
+                    # Execute graph
+                    outputs = graph.execute(batch)
+                    
+                    # Get fusion output
+                    fusion_output = outputs.get(f"{fusion_name}_outcome")
+                    if fusion_output and "y_outcome" in batch:
+                        loss = loss_fn(fusion_output.p_outcome, batch["y_outcome"].float())
+                    else:
+                        continue  # Skip if no valid output
                 
-                loss.backward()
+                # Backward pass
+                self.scaler.scale(loss).backward()
                 
+                # Gradient clipping
                 if self.gradient_clip_norm > 0:
+                    self.scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(
                         graph.nodes[fusion_name].component.parameters(), 
                         self.gradient_clip_norm
                     )
                 
-                optimizer.step()
-                loss_meter.update(loss.item())
+                self.scaler.step(optimizer)
+                self.scaler.update()
+            else:
+                # Execute graph
+                outputs = graph.execute(batch)
+                
+                # Get fusion output
+                fusion_output = outputs.get(f"{fusion_name}_outcome")
+                if fusion_output and "y_outcome" in batch:
+                    loss = loss_fn(fusion_output.p_outcome, batch["y_outcome"].float())
+                    
+                    loss.backward()
+                    
+                    if self.gradient_clip_norm > 0:
+                        torch.nn.utils.clip_grad_norm_(
+                            graph.nodes[fusion_name].component.parameters(), 
+                            self.gradient_clip_norm
+                        )
+                    
+                    optimizer.step()
+                else:
+                    continue  # Skip if no valid output
+            
+            loss_meter.update(loss.item())
             
             # Reset graph for next batch
             graph.reset()
