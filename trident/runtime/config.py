@@ -123,6 +123,7 @@ class ConfigLoader:
     
     def __init__(self):
         self.config: Optional[TridentConfig] = None
+        self.raw_config: Dict[str, Any] = {}
     
     def load_config(self, config_path: Union[str, Path]) -> TridentConfig:
         """
@@ -141,6 +142,9 @@ class ConfigLoader:
         
         with open(config_path, 'r') as f:
             config_data = yaml.safe_load(f)
+        
+        # Store raw config for access to fields not in pydantic model
+        self.raw_config = config_data.copy()
         
         # Resolve path variables
         config_data = self._resolve_path_variables(config_data)

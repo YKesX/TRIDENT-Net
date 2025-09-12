@@ -1,9 +1,12 @@
 """
 TRIDENT-I1: Frag3D - 3D U-Net segmentation over 3 RGB frames
 
+DEPRECATED: This module is legacy v1 code. Use trident_i.videox3d.VideoFrag3Dv2 instead.
+
 Author: Yağızhan Keskin
 """
 
+import warnings
 from typing import List, Tuple, Dict, Any
 
 import torch
@@ -11,6 +14,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ..common.types import BranchModule, EventToken
+
+# Issue deprecation warning when module is imported
+warnings.warn(
+    "trident_i.frag3d is deprecated. Use trident_i.videox3d.VideoFrag3Dv2 instead.",
+    DeprecationWarning,
+    stacklevel=2
+)
 
 
 class Conv3DBlock(nn.Module):

@@ -50,14 +50,14 @@ class Trainer:
         self.mixed_precision = mixed_precision
         self.gradient_clip_norm = gradient_clip_norm
         
+        # Logging
+        self.logger = logging.getLogger(__name__)
+        
         # Setup deterministic training if configured
         self._setup_deterministic_training()
         
         # Mixed precision scaler
         self.scaler = GradScaler() if mixed_precision and self.device.type == "cuda" else None
-        
-        # Logging
-        self.logger = logging.getLogger(__name__)
         
         # Training state
         self.current_epoch = 0
@@ -71,15 +71,25 @@ class Trainer:
         
         # Get environment settings from config
         env_config = getattr(self.config, 'environment', {})
-        if isinstance(env_config, dict):
+        
+        # Check if we have actual environment config vs empty dict
+        if env_config and hasattr(env_config, 'get'):
+            # Dictionary-like access with content
             seed = env_config.get('seed', 12345)
             cudnn_deterministic = env_config.get('cudnn_deterministic', True)
             cudnn_benchmark = env_config.get('cudnn_benchmark', False)
+        elif hasattr(env_config, 'seed') and env_config.seed is not None:
+            # Object-like access
+            seed = getattr(env_config, 'seed', 12345)
+            cudnn_deterministic = getattr(env_config, 'cudnn_deterministic', True)
+            cudnn_benchmark = getattr(env_config, 'cudnn_benchmark', False)
         else:
-            # Fallback defaults
-            seed = 12345
-            cudnn_deterministic = True
-            cudnn_benchmark = False
+            # Check raw config dict if pydantic model doesn't have environment
+            raw_config = getattr(self.config_loader, 'raw_config', {})
+            env_config = raw_config.get('environment', {})
+            seed = env_config.get('seed', 12345)
+            cudnn_deterministic = env_config.get('cudnn_deterministic', True) 
+            cudnn_benchmark = env_config.get('cudnn_benchmark', False)
         
         # Set seeds for reproducibility
         random.seed(seed)
@@ -502,6 +512,10 @@ class Trainer:
         loss_meters = {name: AverageMeter() for name in components.keys()}
         total_loss_meter = AverageMeter()
         
+        # Check if this is the special pretrain_r case
+        comp_names = list(components.keys())
+        is_pretrain_r = any("r2" in name or "r3" in name for name in comp_names)
+        
         for batch in tqdm(data_loader, desc="Multi Training"):
             from ..common.utils import move_to_device
             batch = move_to_device(batch, self.device)
@@ -513,14 +527,9 @@ class Trainer:
             # Forward pass with mixed precision
             if self.scaler:
                 with autocast():
-                    for comp_name, component in components.items():
-                        comp_config = self.config_loader.get_component_config(comp_name)
-                        
-                        outputs = self._forward_single_component(component, batch, comp_config)
-                        loss = self._compute_single_loss(outputs, batch, loss_fns[comp_name], comp_config)
-                        
-                        total_loss += loss
-                        loss_meters[comp_name].update(loss.item())
+                    total_loss = self._forward_multi_components(
+                        components, batch, loss_fns, is_pretrain_r, loss_meters
+                    )
                 
                 # Backward pass
                 self.scaler.scale(total_loss).backward()
@@ -534,14 +543,9 @@ class Trainer:
                 self.scaler.step(optimizer)
                 self.scaler.update()
             else:
-                for comp_name, component in components.items():
-                    comp_config = self.config_loader.get_component_config(comp_name)
-                    
-                    outputs = self._forward_single_component(component, batch, comp_config)
-                    loss = self._compute_single_loss(outputs, batch, loss_fns[comp_name], comp_config)
-                    
-                    total_loss += loss
-                    loss_meters[comp_name].update(loss.item())
+                total_loss = self._forward_multi_components(
+                    components, batch, loss_fns, is_pretrain_r, loss_meters
+                )
                 
                 total_loss.backward()
                 
@@ -550,6 +554,7 @@ class Trainer:
                         torch.nn.utils.clip_grad_norm_(component.parameters(), self.gradient_clip_norm)
                 
                 optimizer.step()
+            
             total_loss_meter.update(total_loss.item())
         
         metrics = {"total_loss": total_loss_meter.avg}
@@ -557,6 +562,108 @@ class Trainer:
             metrics[f"{name}_loss"] = meter.avg
         
         return metrics
+    
+    def _forward_multi_components(self, components, batch, loss_fns, is_pretrain_r, loss_meters):
+        """Forward pass for multiple components with branch-specific logic."""
+        total_loss = 0
+        
+        if is_pretrain_r:
+            # Special pretrain_r flow: r1 → (r2, r3)
+            r1_outputs = None
+            
+            # First, find and run r1 (upstream component)
+            for comp_name, component in components.items():
+                if "r1" in comp_name or "kinefeat" in comp_name.lower():
+                    comp_config = self.config_loader.get_component_config(comp_name)
+                    r1_outputs = self._forward_single_component(component, batch, comp_config)
+                    # r1 typically doesn't have loss - it's a feature extractor
+                    break
+            
+            # Then run r2 and r3 with r1 features
+            if r1_outputs is not None:
+                # Prepare enhanced batch with r1 features for r2/r3
+                enhanced_batch = batch.copy()
+                if isinstance(r1_outputs, dict) and "r_feats" in r1_outputs:
+                    enhanced_batch["r_feats"] = r1_outputs["r_feats"]
+                elif hasattr(r1_outputs, "r_feats"):
+                    enhanced_batch["r_feats"] = r1_outputs.r_feats
+                else:
+                    # Fallback: assume r1_outputs is the feature tensor
+                    enhanced_batch["r_feats"] = r1_outputs
+                
+                # Forward r2 and r3 with enhanced inputs
+                for comp_name, component in components.items():
+                    if ("r2" in comp_name or "r3" in comp_name):
+                        comp_config = self.config_loader.get_component_config(comp_name)
+                        outputs = self._forward_single_component(component, enhanced_batch, comp_config)
+                        
+                        # Compute branch-specific loss if available
+                        loss = self._compute_branch_loss(outputs, enhanced_batch, loss_fns.get(comp_name), comp_config)
+                        if loss is not None:
+                            total_loss += loss
+                            loss_meters[comp_name].update(loss.item())
+        else:
+            # Standard multi-component forward
+            for comp_name, component in components.items():
+                comp_config = self.config_loader.get_component_config(comp_name)
+                
+                outputs = self._forward_single_component(component, batch, comp_config)
+                loss = self._compute_branch_loss(outputs, batch, loss_fns.get(comp_name), comp_config)
+                
+                if loss is not None:
+                    total_loss += loss
+                    loss_meters[comp_name].update(loss.item())
+        
+        return total_loss
+    
+    def _compute_branch_loss(self, outputs, batch, loss_fn, comp_config):
+        """Compute branch-specific loss with graceful handling of missing GT."""
+        if loss_fn is None:
+            return None
+            
+        try:
+            # Check component type for branch-specific loss computation
+            comp_class = comp_config.class_name if hasattr(comp_config, 'class_name') else ""
+            
+            if "videox3d" in comp_class.lower() or "videofrag3d" in comp_class.lower():
+                # I1 branch: segmentation loss (BCE + Dice)
+                if hasattr(outputs, 'mask_seq') and 'gt_masks' in batch:
+                    pred_masks = outputs.mask_seq
+                    gt_masks = batch['gt_masks']
+                    return loss_fn(pred_masks, gt_masks)
+                # Skip if no GT masks available
+                return None
+                
+            elif "ir_dettrack" in comp_class.lower() or "plumedet" in comp_class.lower():
+                # T1 branch: detection/tracking loss
+                if hasattr(outputs, 'tracks') and 'gt_tracks' in batch:
+                    return loss_fn(outputs, batch)  # Let loss_fn handle track-specific logic
+                return None
+                
+            elif "coolcurve" in comp_class.lower():
+                # T2 branch: curve fitting loss
+                if hasattr(outputs, 'tau_hat') and 'gt_curves' in batch:
+                    tau_pred = outputs.tau_hat
+                    curves_gt = batch['gt_curves']
+                    return loss_fn(tau_pred, curves_gt)
+                return None
+                
+            elif "geomlp" in comp_class.lower() or "tinytemporal" in comp_class.lower():
+                # R2/R3 branches: typically no direct GT, use auxiliary loss if available
+                if 'y_hit' in batch and hasattr(outputs, 'zr2'):
+                    # Placeholder auxiliary loss for radar components
+                    pred = torch.mean(outputs.zr2, dim=1, keepdim=True)  # Simple aggregation
+                    return torch.nn.functional.mse_loss(pred, batch['y_hit'])
+                return None
+                
+            else:
+                # Fallback to original single loss computation
+                return self._compute_single_loss(outputs, batch, loss_fn, comp_config)
+                
+        except Exception as e:
+            # Graceful degradation: skip loss if computation fails
+            self.logger.warning(f"Failed to compute loss for component {comp_config}: {e}")
+            return None
     
     def _validate_multi_epoch(self, components, data_loader, loss_fns):
         """Validate multiple components for one epoch."""
@@ -566,22 +673,61 @@ class Trainer:
         loss_meters = {name: AverageMeter() for name in components.keys()}
         total_loss_meter = AverageMeter()
         
+        # Check if this is the special pretrain_r case
+        comp_names = list(components.keys())
+        is_pretrain_r = any("r2" in name or "r3" in name for name in comp_names)
+        
         with torch.no_grad():
             for batch in tqdm(data_loader, desc="Multi Validation"):
                 from ..common.utils import move_to_device
                 batch = move_to_device(batch, self.device)
                 
                 total_loss = 0
-                for comp_name, component in components.items():
-                    comp_config = self.config_loader.get_component_config(comp_name)
-                    
-                    outputs = self._forward_single_component(component, batch, comp_config)
-                    loss = self._compute_single_loss(outputs, batch, loss_fns[comp_name], comp_config)
-                    
-                    total_loss += loss
-                    loss_meters[comp_name].update(loss.item())
                 
-                total_loss_meter.update(total_loss.item())
+                if is_pretrain_r:
+                    # Special pretrain_r flow: r1 → (r2, r3)
+                    r1_outputs = None
+                    
+                    # First, find and run r1 (upstream component)
+                    for comp_name, component in components.items():
+                        if "r1" in comp_name or "kinefeat" in comp_name.lower():
+                            comp_config = self.config_loader.get_component_config(comp_name)
+                            r1_outputs = self._forward_single_component(component, batch, comp_config)
+                            break
+                    
+                    # Then run r2 and r3 with r1 features
+                    if r1_outputs is not None:
+                        enhanced_batch = batch.copy()
+                        if isinstance(r1_outputs, dict) and "r_feats" in r1_outputs:
+                            enhanced_batch["r_feats"] = r1_outputs["r_feats"]
+                        elif hasattr(r1_outputs, "r_feats"):
+                            enhanced_batch["r_feats"] = r1_outputs.r_feats
+                        else:
+                            enhanced_batch["r_feats"] = r1_outputs
+                        
+                        for comp_name, component in components.items():
+                            if ("r2" in comp_name or "r3" in comp_name):
+                                comp_config = self.config_loader.get_component_config(comp_name)
+                                outputs = self._forward_single_component(component, enhanced_batch, comp_config)
+                                
+                                loss = self._compute_branch_loss(outputs, enhanced_batch, loss_fns.get(comp_name), comp_config)
+                                if loss is not None:
+                                    total_loss += loss
+                                    loss_meters[comp_name].update(loss.item())
+                else:
+                    # Standard multi-component validation
+                    for comp_name, component in components.items():
+                        comp_config = self.config_loader.get_component_config(comp_name)
+                        
+                        outputs = self._forward_single_component(component, batch, comp_config)
+                        loss = self._compute_branch_loss(outputs, batch, loss_fns.get(comp_name), comp_config)
+                        
+                        if loss is not None:
+                            total_loss += loss
+                            loss_meters[comp_name].update(loss.item())
+                
+                if total_loss > 0:
+                    total_loss_meter.update(total_loss.item())
         
         metrics = {"total_loss": total_loss_meter.avg}
         for name, meter in loss_meters.items():

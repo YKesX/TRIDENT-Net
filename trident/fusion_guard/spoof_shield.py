@@ -93,6 +93,16 @@ class SpoofShield(GuardModule):
                 sample_events, self.consistency_dt_ms
             )
             
+            # Postframe evidence check (Phase 6 requirement)
+            postframe_gate, postframe_risk, postframe_reason = self._check_postframe_evidence(
+                sample_events, self.require_postframe_evidence
+            )
+            
+            # Combine temporal and postframe gates (use minimum for stricter gating)
+            combined_temporal_gate = min(temporal_gate, postframe_gate)
+            combined_temporal_risk = max(temporal_risk, postframe_risk)
+            combined_temporal_reason = f"{temporal_reason}; {postframe_reason}"
+            
             # Spatial plausibility check
             spatial_gate, spatial_risk, spatial_reason = self._check_spatial_plausibility(
                 sample_events, sample_geom
@@ -106,20 +116,26 @@ class SpoofShield(GuardModule):
                 sample_priors
             )
             
-            # Store gate information
-            gates["temporal"].append(temporal_gate)
+            # Store gate information (using combined temporal values)
+            gates["temporal"].append(combined_temporal_gate)
             gates["spatial"].append(spatial_gate)  
             gates["class"].append(class_gate)
             
-            # Compute overall spoofing risk
-            risks = torch.tensor([temporal_risk, spatial_risk, class_risk], device=device)
+            # Compute overall spoofing risk (using combined temporal values)
+            risks = torch.tensor([combined_temporal_risk, spatial_risk, class_risk], device=device)
             weights = torch.softmax(self.gate_weights, dim=0)
             sample_risk = torch.sum(weights * risks)
             spoof_risk[i, 0] = sample_risk
             
-            # Create explanation
+            # Create explanation (including postframe info)
             explanation = {
-                "temporal": {"gate": temporal_gate, "risk": temporal_risk, "reason": temporal_reason},
+                "temporal": {
+                    "gate": combined_temporal_gate, 
+                    "risk": combined_temporal_risk, 
+                    "reason": combined_temporal_reason,
+                    "postframe_gate": postframe_gate,
+                    "postframe_reason": postframe_reason
+                },
                 "spatial": {"gate": spatial_gate, "risk": spatial_risk, "reason": spatial_reason},
                 "class": {"gate": class_gate, "risk": class_risk, "reason": class_reason},
                 "overall_risk": sample_risk.item(),
