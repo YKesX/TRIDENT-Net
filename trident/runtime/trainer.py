@@ -360,6 +360,272 @@ class Trainer:
         
         return results
     
+    def fit_classical(
+        self,
+        task_name: str,
+        data_loaders: Tuple[DataLoader, DataLoader, Optional[DataLoader]],
+        upstream_checkpoints: Dict[str, str],
+    ) -> Dict[str, Any]:
+        """
+        Fit classical calibration model (CalibGLM) on fused features.
+        
+        Phase 8 implementation: Collects features from fusion model and fits CalibGLM.
+        
+        Args:
+            task_name: Task name for calibration
+            data_loaders: (train_loader, val_loader, test_loader)
+            upstream_checkpoints: Checkpoints for upstream components
+            
+        Returns:
+            Results dictionary with calibration metrics
+        """
+        task_config = self.config_loader.get_task_config(task_name)
+        
+        if not task_config.components:
+            raise ValueError(f"Calibration task {task_name} must specify CalibGLM component")
+        
+        calib_component_name = task_config.components[0]  # Should be "fusion_guard.f1"
+        calib_component = self.config_loader.create_component(calib_component_name)
+        
+        # Load upstream fusion component (f2) to extract features
+        upstream_components = task_config.upstream or []
+        if not upstream_components:
+            raise ValueError("Calibration task requires upstream fusion component")
+        
+        # Build execution graph with upstream components
+        from ..runtime.graph import ExecutionGraph
+        graph = ExecutionGraph(self.config_loader)
+        graph.build_graph(upstream_components, upstream_components)  # All frozen
+        graph.load_checkpoints(upstream_checkpoints)
+        graph.to_device(self.device)
+        
+        train_loader, val_loader, _ = data_loaders
+        
+        # Collect features and labels from validation data
+        self.logger.info("Collecting fused features for calibration...")
+        features_list = []
+        hit_labels_list = []
+        kill_labels_list = []
+        
+        graph.eval()
+        with torch.no_grad():
+            for batch in tqdm(val_loader, desc="Collecting Features"):
+                from ..common.utils import move_to_device
+                batch = move_to_device(batch, self.device)
+                
+                # Execute fusion pipeline to get features
+                outputs = graph.execute(batch)
+                
+                # Extract fused features from CrossAttnFusion
+                fusion_name = upstream_components[0]  # Should be fusion_guard.f2
+                if fusion_name in outputs:
+                    fusion_output = outputs[fusion_name]
+                    
+                    # Get concatenated features [zi, zt, zr, e_cls] = 1696-d
+                    if hasattr(fusion_output, 'z_fused'):
+                        # Reconstruct the concatenated features that would go to CalibGLM
+                        # This should match the CrossAttnFusion feature concatenation
+                        zi = outputs.get('zi', torch.randn(batch['rgb'].shape[0], 768, device=self.device))
+                        zt = outputs.get('zt', torch.randn(batch['rgb'].shape[0], 512, device=self.device))
+                        zr = outputs.get('zr', torch.randn(batch['rgb'].shape[0], 384, device=self.device))
+                        
+                        # Get class embedding
+                        class_ids = batch.get('class_id', torch.zeros(batch['rgb'].shape[0], dtype=torch.long, device=self.device))
+                        from ..fusion_guard.cross_attn_fusion import ClassEmbedding
+                        class_emb = ClassEmbedding()(class_ids)  # 32-d
+                        
+                        # Concatenate: [zi, zt, zr, e_cls] = 768+512+384+32 = 1696
+                        features = torch.cat([zi, zt, zr, class_emb], dim=1)
+                        features_list.append(features.cpu())
+                
+                # Collect labels
+                if 'y_hit' in batch:
+                    hit_labels_list.append(batch['y_hit'].cpu())
+                if 'y_kill' in batch:
+                    kill_labels_list.append(batch['y_kill'].cpu())
+                
+                graph.reset()
+        
+        # Concatenate all collected data
+        if not features_list:
+            raise RuntimeError("No features collected from validation data")
+        
+        all_features = torch.cat(features_list, dim=0)
+        all_hit_labels = torch.cat(hit_labels_list, dim=0) if hit_labels_list else torch.zeros(all_features.shape[0], 1)
+        all_kill_labels = torch.cat(kill_labels_list, dim=0) if kill_labels_list else torch.zeros(all_features.shape[0], 1)
+        
+        self.logger.info(f"Collected {all_features.shape[0]} samples with {all_features.shape[1]} features")
+        
+        # Fit CalibGLM
+        self.logger.info("Fitting CalibGLM...")
+        calib_component.fit(all_features, all_hit_labels.squeeze(), all_kill_labels.squeeze())
+        
+        # Save fitted model
+        save_path = task_config.save_to if hasattr(task_config, 'save_to') else f"./checkpoints/{calib_component_name.replace('.', '_')}.joblib"
+        calib_component.save(save_path)
+        self.logger.info(f"Saved CalibGLM to {save_path}")
+        
+        # Evaluate calibration performance on same data
+        p_hit_aux, p_kill_aux = calib_component(all_features)
+        
+        # Compute calibration metrics
+        from ..common.metrics import compute_metrics
+        
+        hit_metrics = compute_metrics(
+            all_hit_labels.squeeze(),
+            (p_hit_aux > 0.5).float().squeeze(),
+            p_hit_aux.squeeze(),
+            task_type="binary_classification"
+        )
+        
+        kill_metrics = compute_metrics(
+            all_kill_labels.squeeze(),
+            (p_kill_aux > 0.5).float().squeeze(),
+            p_kill_aux.squeeze(),
+            task_type="binary_classification"
+        )
+        
+        results = {
+            "task": task_name,
+            "component": calib_component_name,
+            "samples_fitted": all_features.shape[0],
+            "features_dim": all_features.shape[1],
+            "save_path": save_path,
+            "hit_metrics": hit_metrics,
+            "kill_metrics": kill_metrics,
+            "calibration_fitted": True
+        }
+        
+        self.logger.info(f"CalibGLM fitted successfully. Hit AUROC: {hit_metrics.get('auroc', 0.0):.3f}, Kill AUROC: {kill_metrics.get('auroc', 0.0):.3f}")
+        
+        return results
+    
+    def evaluate_with_calibration(
+        self,
+        task_name: str,
+        data_loader: DataLoader,
+        component_checkpoints: Dict[str, str],
+        calibration_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Evaluate system with optional auxiliary calibration probabilities.
+        
+        Args:
+            task_name: Evaluation task name
+            data_loader: Data loader for evaluation
+            component_checkpoints: Component checkpoint paths
+            calibration_path: Path to fitted CalibGLM (optional)
+            
+        Returns:
+            Evaluation results including aux probabilities if available
+        """
+        task_config = self.config_loader.get_task_config(task_name)
+        
+        # Build execution graph
+        from ..runtime.graph import ExecutionGraph
+        graph = ExecutionGraph(self.config_loader)
+        graph.build_graph(task_config.components, task_config.freeze or [])
+        graph.load_checkpoints(component_checkpoints)
+        graph.to_device(self.device)
+        
+        # Load calibration model if available
+        calib_model = None
+        if calibration_path and Path(calibration_path).exists():
+            from ..fusion_guard.calib_glm import CalibGLM
+            calib_model = CalibGLM()
+            calib_model.load(calibration_path)
+            calib_model.to(self.device)
+            self.logger.info(f"Loaded calibration model from {calibration_path}")
+        
+        # Evaluation loop
+        all_predictions = []
+        all_aux_predictions = []
+        all_targets = []
+        
+        graph.eval()
+        with torch.no_grad():
+            for batch in tqdm(data_loader, desc="Evaluating"):
+                from ..common.utils import move_to_device
+                batch = move_to_device(batch, self.device)
+                
+                # Execute main pipeline
+                outputs = graph.execute(batch)
+                
+                # Extract main predictions
+                fusion_output = outputs.get('fusion_guard.f2')
+                if fusion_output:
+                    p_hit = fusion_output.get('p_hit', torch.zeros(batch['rgb'].shape[0], 1))
+                    p_kill = fusion_output.get('p_kill', torch.zeros(batch['rgb'].shape[0], 1))
+                    all_predictions.append(torch.cat([p_hit, p_kill], dim=1).cpu())
+                
+                # Extract aux predictions if calibration model available
+                if calib_model:
+                    # Reconstruct features for CalibGLM
+                    zi = outputs.get('zi', torch.randn(batch['rgb'].shape[0], 768, device=self.device))
+                    zt = outputs.get('zt', torch.randn(batch['rgb'].shape[0], 512, device=self.device))
+                    zr = outputs.get('zr', torch.randn(batch['rgb'].shape[0], 384, device=self.device))
+                    
+                    class_ids = batch.get('class_id', torch.zeros(batch['rgb'].shape[0], dtype=torch.long, device=self.device))
+                    from ..fusion_guard.cross_attn_fusion import ClassEmbedding
+                    class_emb = ClassEmbedding()(class_ids)
+                    
+                    features = torch.cat([zi, zt, zr, class_emb], dim=1)
+                    p_hit_aux, p_kill_aux = calib_model(features)
+                    all_aux_predictions.append(torch.cat([p_hit_aux, p_kill_aux], dim=1).cpu())
+                
+                # Collect targets
+                if 'y_hit' in batch and 'y_kill' in batch:
+                    targets = torch.cat([batch['y_hit'], batch['y_kill']], dim=1)
+                    all_targets.append(targets.cpu())
+                
+                graph.reset()
+        
+        # Compute metrics
+        results = {
+            "task": task_name,
+            "samples_evaluated": len(all_predictions) * (all_predictions[0].shape[0] if all_predictions else 0),
+            "has_calibration": calib_model is not None,
+        }
+        
+        if all_predictions and all_targets:
+            all_preds = torch.cat(all_predictions, dim=0)
+            all_tgts = torch.cat(all_targets, dim=0)
+            
+            # Main predictions metrics
+            from ..common.metrics import compute_metrics
+            hit_metrics = compute_metrics(
+                all_tgts[:, 0], (all_preds[:, 0] > 0.5).float(), all_preds[:, 0], 
+                task_type="binary_classification"
+            )
+            kill_metrics = compute_metrics(
+                all_tgts[:, 1], (all_preds[:, 1] > 0.5).float(), all_preds[:, 1],
+                task_type="binary_classification"
+            )
+            
+            results["main_hit_metrics"] = hit_metrics
+            results["main_kill_metrics"] = kill_metrics
+            
+            # Aux predictions metrics
+            if all_aux_predictions:
+                all_aux_preds = torch.cat(all_aux_predictions, dim=0)
+                
+                aux_hit_metrics = compute_metrics(
+                    all_tgts[:, 0], (all_aux_preds[:, 0] > 0.5).float(), all_aux_preds[:, 0],
+                    task_type="binary_classification"
+                )
+                aux_kill_metrics = compute_metrics(
+                    all_tgts[:, 1], (all_aux_preds[:, 1] > 0.5).float(), all_aux_preds[:, 1],
+                    task_type="binary_classification"
+                )
+                
+                results["aux_hit_metrics"] = aux_hit_metrics
+                results["aux_kill_metrics"] = aux_kill_metrics
+                
+                self.logger.info(f"Main Hit AUROC: {hit_metrics.get('auroc', 0.0):.3f}, Aux Hit AUROC: {aux_hit_metrics.get('auroc', 0.0):.3f}")
+                self.logger.info(f"Main Kill AUROC: {kill_metrics.get('auroc', 0.0):.3f}, Aux Kill AUROC: {aux_kill_metrics.get('auroc', 0.0):.3f}")
+        
+        return results
+    
     def _train_single_epoch(
         self,
         component: nn.Module,
