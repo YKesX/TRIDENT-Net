@@ -59,7 +59,7 @@ def test_dataloader_functionality():
     """Test dataloader with synthetic data."""
     print("🧪 Testing dataloader functionality...")
     
-    dataset = SyntheticDataset(n_samples=8)
+    dataset = SyntheticDataset(size=8)
     # Use the custom collate function to handle variable T
     from trident.data.collate import pad_tracks_collate
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=4, shuffle=True, collate_fn=pad_tracks_collate)
