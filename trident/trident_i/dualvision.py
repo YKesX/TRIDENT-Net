@@ -1,14 +1,24 @@
 """
 TRIDENT-I3: DualVision - Siamese encoder for structural change detection
 
+DEPRECATED: This module is legacy v1 code. Use trident_i.dualvision_v2.DualVisionV2 instead.
+
 Author: Yağızhan Keskin
 """
 
+import warnings
 from typing import List, Tuple, Dict, Any
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+# Issue deprecation warning when module is imported
+warnings.warn(
+    "trident_i.dualvision is deprecated. Use trident_i.dualvision_v2.DualVisionV2 instead.",
+    DeprecationWarning,
+    stacklevel=2
+)
 
 try:
     import timm

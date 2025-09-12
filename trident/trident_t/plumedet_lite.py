@@ -1,9 +1,12 @@
 """
 TRIDENT-T1: PlumeDetLite - Lightweight plume detection and tracking over 3 IR frames
 
+DEPRECATED: This module is legacy v1 code. Use trident_t.ir_dettrack_v2.PlumeDetXL instead.
+
 Author: Yağızhan Keskin
 """
 
+import warnings
 from typing import List, Tuple, Dict, Any
 
 import torch
@@ -11,6 +14,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ..common.types import BranchModule, EventToken
+
+# Issue deprecation warning when module is imported
+warnings.warn(
+    "trident_t.plumedet_lite is deprecated. Use trident_t.ir_dettrack_v2.PlumeDetXL instead.",
+    DeprecationWarning,
+    stacklevel=2
+)
 
 
 class PlumeDetLite(BranchModule):

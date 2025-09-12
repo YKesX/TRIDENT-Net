@@ -285,3 +285,41 @@ def export_guard_model(
     )
     
     return results
+
+
+class ModelExporter:
+    """Model exporter class for convenient export operations."""
+    
+    def __init__(self, model: nn.Module):
+        self.model = model
+        
+    def to_torchscript(self, dummy_input: torch.Tensor, use_tracing: bool = True) -> torch.jit.ScriptModule:
+        """Export model to TorchScript."""
+        self.model.eval()
+        
+        if use_tracing:
+            return torch.jit.trace(self.model, dummy_input)
+        else:
+            return torch.jit.script(self.model)
+    
+    def to_onnx(self, dummy_input: torch.Tensor, output_path: str, **kwargs) -> bool:
+        """Export model to ONNX."""
+        if not ONNX_AVAILABLE:
+            logging.warning("ONNX not available")
+            return False
+            
+        try:
+            self.model.eval()
+            torch.onnx.export(
+                self.model,
+                dummy_input,
+                output_path,
+                export_params=True,
+                opset_version=kwargs.get('opset_version', 11),
+                do_constant_folding=True,
+                **kwargs
+            )
+            return True
+        except Exception as e:
+            logging.error(f"ONNX export failed: {e}")
+            return False

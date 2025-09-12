@@ -45,7 +45,7 @@ class CoolCurve3(BranchModule):
         self.curve_analyzer = CurveAnalyzer(mlp_hidden)
         
         # Track aggregation network
-        self.track_aggregator = TrackAggregator(mlp_hidden, out_dim)
+        self.track_aggregator = TrackAggregator(mlp_hidden // 2, out_dim)
         
         # Cooling time constant estimator
         self.tau_estimator = nn.Sequential(
@@ -144,18 +144,18 @@ class CoolCurve3(BranchModule):
                     cooling_rate = self._compute_cooling_rate(intensity_curve)
                     
                     event = EventToken(
-                        event_type=event_type,
-                        confidence=max(abs(debris_prob - 0.5) * 2, 0.5),  # Confidence from classification
-                        location=(0, 0),  # No spatial location for cooling curves
-                        timestamp=2,  # End of sequence
-                        source="coolcurve3",
-                        metadata={
+                        type=event_type,
+                        score=max(abs(debris_prob - 0.5) * 2, 0.5),  # Confidence from classification
+                        t_ms=200,  # End of sequence, convert to ms
+                        meta={
                             'track_id': track_idx,
                             'tau_estimate': tau_val,
                             'debris_probability': debris_prob,
                             'cooling_rate': cooling_rate,
                             'initial_intensity': intensity_curve[0].item(),
                             'final_intensity': intensity_curve[-1].item(),
+                            'location': (0, 0),  # No spatial location for cooling curves
+                            'source': "coolcurve3",
                             'batch_idx': b
                         }
                     )

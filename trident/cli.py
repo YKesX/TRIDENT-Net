@@ -179,9 +179,20 @@ def run_task(
             results = evaluator.evaluate_system(task_config.components, data_loaders[2], checkpoint_map)
             
         elif task_config.run == "fit_classical":
-            # Handle classical ML training (SVM)
-            logger.info("Classical ML training not fully implemented in CLI")
-            results = {"status": "not_implemented"}
+            # Handle classical calibration training (Phase 8)
+            trainer = Trainer(config_loader, device=target_device)
+            
+            # Load upstream fusion checkpoints
+            upstream_checkpoints = {}
+            for comp_name in task_config.upstream or []:
+                ckpt_path = f"{trident_config.paths.ckpt_root}/{comp_name.replace('.', '_')}.pt"
+                if Path(ckpt_path).exists():
+                    upstream_checkpoints[comp_name] = ckpt_path
+                else:
+                    logger.warning(f"Upstream checkpoint not found for {comp_name}: {ckpt_path}")
+            
+            logger.info(f"Fitting classical calibration model with {len(upstream_checkpoints)} upstream components")
+            results = trainer.fit_classical(name, data_loaders, upstream_checkpoints)
             
         elif task_config.run == "serve":
             # Handle serving
