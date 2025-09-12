@@ -209,7 +209,7 @@ def test_1280x720_standardization():
     # Test synthetic batch generation
     from trident.data.synthetic import generate_synthetic_batch
     
-    batch = generate_synthetic_batch(batch_size=2, height=720, width=1280)
+    batch = generate_synthetic_batch(batch_size=2, height=720, width=1280, legacy_format=True)
     
     # Verify batch RGB frames are 1280×720 (B, C, T, H, W)
     batch_rgb_shape = batch['rgb_frames'].shape
@@ -223,12 +223,12 @@ def test_1280x720_standardization():
     old_height, old_width = 1248, 704
     
     # Generate batch with old dimensions should work but we verify we're not using them by default
-    old_batch = generate_synthetic_batch(batch_size=1, height=old_height, width=old_width)
+    old_batch = generate_synthetic_batch(B=1, H=old_height, W=old_width, legacy_format=True)
     old_rgb_shape = old_batch['rgb_frames'].shape
     assert old_rgb_shape[3:] == (old_height, old_width), "Old resolution test failed"
     
     # But our default should always be 720p
-    default_batch = generate_synthetic_batch(batch_size=1)  # No explicit size
+    default_batch = generate_synthetic_batch(B=1)  # No explicit size
     # Should use default from function signature
     
     print("✅ 1280×720 standardization test passed")
