@@ -60,8 +60,6 @@ class ComponentRegistry:
             "data.dataset.VideoJsonlDataset": "trident.data.dataset.VideoJsonlDataset",
             "data.transforms.AlbuStereoClip": "trident.data.transforms.AlbuStereoClip",
             "data.video_ring.VideoRing": "trident.data.video_ring.VideoRing",
-            "data.collate.pad_tracks_collate": "trident.data.collate.pad_tracks_collate",
-            "data.synthetic.SyntheticVideoJsonl": "trident.data.synthetic.SyntheticVideoJsonl",
             
             # XAI
             "xai_text.templater.Templater": "trident.xai_text.templater.Templater",
