@@ -265,6 +265,89 @@ class CrossAttnFusion(FusionModule):
         calibration_features = torch.cat([zi, zt, zr, class_emb], dim=-1)  # (B, 1696)
         
         return calibration_features
+    
+    def compute_loss(self, p_hit: torch.Tensor, p_kill: torch.Tensor,
+                    y_hit: torch.Tensor, y_kill: torch.Tensor,
+                    loss_config: dict = None) -> dict:
+        """
+        Compute fusion multitask loss with hierarchy regularization.
+        
+        Args:
+            p_hit: Predicted hit probabilities (B, 1)
+            p_kill: Predicted kill probabilities (B, 1)
+            y_hit: True hit labels (B, 1)
+            y_kill: True kill labels (B, 1)
+            loss_config: Loss configuration dictionary
+            
+        Returns:
+            Dictionary with total loss and component losses
+        """
+        from ..common.losses import FusionMultitaskLoss
+        
+        # Default loss configuration
+        if loss_config is None:
+            loss_config = {
+                'bce_hit': 1.0,
+                'bce_kill': 1.0,
+                'brier': 0.25,
+                'hierarchy_regularizer': {'weight': 0.2}
+            }
+        
+        # Create fusion loss
+        fusion_loss = FusionMultitaskLoss(
+            bce_hit_weight=loss_config.get('bce_hit', 1.0),
+            bce_kill_weight=loss_config.get('bce_kill', 1.0),
+            brier_weight=loss_config.get('brier', 0.25),
+            hierarchy_weight=loss_config.get('hierarchy_regularizer', {}).get('weight', 0.2)
+        )
+        
+        # Compute loss
+        return fusion_loss(p_hit, p_kill, y_hit, y_kill)
+    
+    def compute_metrics(self, p_hit: torch.Tensor, p_kill: torch.Tensor,
+                       y_hit: torch.Tensor, y_kill: torch.Tensor) -> dict:
+        """
+        Compute evaluation metrics for fusion outputs.
+        
+        Args:
+            p_hit: Predicted hit probabilities (B, 1)
+            p_kill: Predicted kill probabilities (B, 1)
+            y_hit: True hit labels (B, 1)
+            y_kill: True kill labels (B, 1)
+            
+        Returns:
+            Dictionary of computed metrics
+        """
+        from ..common.metrics import auroc, f1, brier_score, expected_calibration_error
+        
+        metrics = {}
+        
+        # AUROC metrics
+        try:
+            metrics['AUROC_hit'] = auroc(y_hit, p_hit)
+            metrics['AUROC_kill'] = auroc(y_kill, p_kill)
+        except:
+            metrics['AUROC_hit'] = float('nan')
+            metrics['AUROC_kill'] = float('nan')
+        
+        # F1 metrics
+        metrics['F1_hit'] = f1(y_hit, p_hit, threshold=0.5)
+        metrics['F1_kill'] = f1(y_kill, p_kill, threshold=0.5)
+        
+        # Brier score metrics
+        metrics['Brier_hit'] = brier_score(y_hit, p_hit)
+        metrics['Brier_kill'] = brier_score(y_kill, p_kill)
+        
+        # ECE metrics
+        metrics['ECE_hit'] = expected_calibration_error(y_hit, p_hit, n_bins=15)
+        metrics['ECE_kill'] = expected_calibration_error(y_kill, p_kill, n_bins=15)
+        
+        # Hierarchy constraint violation rate
+        violations = torch.relu(p_kill - p_hit)
+        metrics['hierarchy_violation_rate'] = (violations > 0).float().mean().item()
+        metrics['hierarchy_violation_magnitude'] = violations.mean().item()
+        
+        return metrics
 
 
 class CrossModalTransformerLayer(nn.Module):

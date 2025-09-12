@@ -191,6 +191,135 @@ class GIoULoss(nn.Module):
         return 1 - giou.mean()
 
 
+class HierarchyRegularizer(nn.Module):
+    """
+    Hierarchy regularizer to enforce p_kill <= p_hit constraint.
+    
+    Computes λ * mean(relu(p_kill - p_hit)) to penalize violations
+    of the logical hierarchy constraint.
+    """
+    
+    def __init__(self, weight: float = 0.2):
+        super().__init__()
+        self.weight = weight
+        
+    def forward(self, p_hit: torch.Tensor, p_kill: torch.Tensor) -> torch.Tensor:
+        """
+        Compute hierarchy regularization loss.
+        
+        Args:
+            p_hit: Hit probabilities (B, 1)
+            p_kill: Kill probabilities (B, 1)
+            
+        Returns:
+            Hierarchy regularization loss
+        """
+        # Penalize cases where p_kill > p_hit (logical violation)
+        violations = torch.relu(p_kill - p_hit)
+        return self.weight * violations.mean()
+
+
+class BrierScore(nn.Module):
+    """
+    Brier Score for probability calibration assessment.
+    
+    Computes mean((p - y)^2) where p is predicted probability and y is binary target.
+    """
+    
+    def __init__(self):
+        super().__init__()
+        
+    def forward(self, p_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
+        """
+        Compute Brier score.
+        
+        Args:
+            p_pred: Predicted probabilities (B, 1) in [0, 1]
+            y_true: True binary labels (B, 1) in {0, 1}
+            
+        Returns:
+            Brier score loss
+        """
+        return torch.mean((p_pred - y_true) ** 2)
+
+
+class FusionMultitaskLoss(nn.Module):
+    """
+    Multitask loss for fusion module with hierarchy regularization.
+    
+    Combines:
+    - BCE(hit) + BCE(kill) + Brier(hit) + Brier(kill) + λ*hierarchy_regularizer
+    """
+    
+    def __init__(
+        self, 
+        bce_hit_weight: float = 1.0,
+        bce_kill_weight: float = 1.0,
+        brier_weight: float = 0.25,
+        hierarchy_weight: float = 0.2
+    ):
+        super().__init__()
+        
+        self.bce_hit_weight = bce_hit_weight
+        self.bce_kill_weight = bce_kill_weight
+        self.brier_weight = brier_weight
+        
+        # Loss components
+        self.bce_loss = nn.BCELoss()
+        self.brier_score = BrierScore()
+        self.hierarchy_regularizer = HierarchyRegularizer(hierarchy_weight)
+        
+    def forward(
+        self, 
+        p_hit: torch.Tensor, 
+        p_kill: torch.Tensor,
+        y_hit: torch.Tensor,
+        y_kill: torch.Tensor
+    ) -> dict:
+        """
+        Compute multitask fusion loss.
+        
+        Args:
+            p_hit: Predicted hit probabilities (B, 1)
+            p_kill: Predicted kill probabilities (B, 1)
+            y_hit: True hit labels (B, 1)
+            y_kill: True kill labels (B, 1)
+            
+        Returns:
+            Dictionary with total loss and component losses
+        """
+        # Ensure probabilities are in [0, 1] and targets are float
+        p_hit = torch.clamp(p_hit, 0.0, 1.0)
+        p_kill = torch.clamp(p_kill, 0.0, 1.0)
+        y_hit = y_hit.float()
+        y_kill = y_kill.float()
+        
+        # Component losses
+        bce_hit = self.bce_loss(p_hit, y_hit)
+        bce_kill = self.bce_loss(p_kill, y_kill)
+        brier_hit = self.brier_score(p_hit, y_hit)
+        brier_kill = self.brier_score(p_kill, y_kill)
+        hierarchy_reg = self.hierarchy_regularizer(p_hit, p_kill)
+        
+        # Total loss
+        total_loss = (
+            self.bce_hit_weight * bce_hit + 
+            self.bce_kill_weight * bce_kill +
+            self.brier_weight * brier_hit +
+            self.brier_weight * brier_kill +
+            hierarchy_reg
+        )
+        
+        return {
+            'total_loss': total_loss,
+            'bce_hit': bce_hit,
+            'bce_kill': bce_kill, 
+            'brier_hit': brier_hit,
+            'brier_kill': brier_kill,
+            'hierarchy_reg': hierarchy_reg
+        }
+
+
 def get_loss_fn(loss_name: str, **kwargs) -> nn.Module:
     """Factory function for loss functions."""
     loss_map = {
@@ -205,6 +334,9 @@ def get_loss_fn(loss_name: str, **kwargs) -> nn.Module:
         "ce_iou": CEIoULoss,
         "huber_ce": HuberCELoss,
         "giou_obj": GIoULoss,
+        "hierarchy_regularizer": HierarchyRegularizer,
+        "brier_score": BrierScore,
+        "fusion_multitask": FusionMultitaskLoss,
     }
     
     if loss_name not in loss_map:
