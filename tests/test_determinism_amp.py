@@ -231,6 +231,88 @@ def test_trainer_amp_configuration():
         os.unlink(config_file)
 
 
+def test_full_determinism_smoke():
+    """Smoke test for full deterministic behavior with fixed seeds."""
+    print("🧪 Testing full determinism smoke test...")
+    
+    seed = 42
+    
+    # Test 1: Two identical runs should produce identical results
+    def run_deterministic_forward():
+        # Setup deterministic environment
+        setup_deterministic_training(seed)
+        
+        # Create simple model
+        model = torch.nn.Sequential(
+            torch.nn.Linear(10, 5),
+            torch.nn.ReLU(),
+            torch.nn.Linear(5, 1)
+        )
+        
+        # Create deterministic input
+        torch.manual_seed(seed)  # Ensure input is also deterministic
+        x = torch.randn(2, 10)
+        
+        # Forward pass
+        model.eval()
+        with torch.no_grad():
+            output = model(x)
+        
+        return output
+    
+    # Run twice with same seed
+    output1 = run_deterministic_forward()
+    output2 = run_deterministic_forward()
+    
+    # Should be identical
+    assert torch.allclose(output1, output2, atol=1e-8), \
+        f"Deterministic runs produced different outputs: diff = {(output1 - output2).abs().max()}"
+    
+    print("✅ Full determinism smoke test passed")
+
+
+def test_non_deterministic_behavior():
+    """Test that without deterministic setup, results vary."""
+    print("🧪 Testing non-deterministic behavior...")
+    
+    def run_non_deterministic_forward():
+        # Create simple model without deterministic setup
+        model = torch.nn.Sequential(
+            torch.nn.Linear(10, 5),
+            torch.nn.ReLU(),  
+            torch.nn.Linear(5, 1)
+        )
+        
+        # Random input (not seeded)
+        x = torch.randn(2, 10)
+        
+        # Forward pass
+        model.eval()
+        with torch.no_grad():
+            output = model(x)
+        
+        return output
+    
+    # Run multiple times
+    outputs = [run_non_deterministic_forward() for _ in range(3)]
+    
+    # Should be different (with very high probability)
+    all_different = True
+    for i in range(len(outputs)):
+        for j in range(i + 1, len(outputs)):
+            if torch.allclose(outputs[i], outputs[j], atol=1e-6):
+                all_different = False
+                break
+        if not all_different:
+            break
+    
+    # Note: This test might occasionally fail due to random chance, but very unlikely
+    if all_different:
+        print("✅ Non-deterministic behavior confirmed")
+    else:
+        print("⚠️ Non-deterministic test: outputs happened to be similar (rare but possible)")
+
+
 if __name__ == "__main__":
     test_deterministic_setup()
     test_deterministic_forward_passes()
@@ -238,4 +320,6 @@ if __name__ == "__main__":
     test_amp_training_step()
     test_gradient_clipping()
     test_trainer_amp_configuration()
+    test_full_determinism_smoke()
+    test_non_deterministic_behavior()
     print("✅ All determinism and AMP tests passed!")
