@@ -14,6 +14,56 @@ import math
 from ..common.types import FusionModule, EventToken
 
 
+class ClassEmbedding(nn.Module):
+    """
+    Class embedding layer for injecting class information into fusion.
+    
+    Creates embeddings for class IDs with fallback support for unknown classes.
+    """
+    
+    def __init__(self, num_classes: int, embed_dim: int = 32):
+        super().__init__()
+        self.num_classes = num_classes
+        self.embed_dim = embed_dim
+        
+        # Main embedding table for known classes
+        self.embedding = nn.Embedding(num_classes, embed_dim)
+        
+        # Fallback embedding for unknown/out-of-vocab classes  
+        self.unknown_embedding = nn.Parameter(torch.randn(embed_dim))
+        
+        # Initialize embeddings
+        nn.init.normal_(self.embedding.weight, std=0.1)
+        nn.init.normal_(self.unknown_embedding, std=0.1)
+        
+    def forward(self, class_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass through class embedding.
+        
+        Args:
+            class_ids: Class IDs (B,) - integer tensor
+            
+        Returns:
+            Class embeddings (B, embed_dim)
+        """
+        B = class_ids.shape[0]
+        device = class_ids.device
+        
+        # Handle out-of-vocabulary class IDs
+        valid_mask = (class_ids >= 0) & (class_ids < self.num_classes)
+        
+        # Initialize output with unknown embeddings
+        output = self.unknown_embedding.unsqueeze(0).expand(B, -1).clone()
+        
+        if valid_mask.any():
+            # Use learned embeddings for valid class IDs
+            valid_ids = class_ids[valid_mask]
+            valid_embeddings = self.embedding(valid_ids)
+            output[valid_mask] = valid_embeddings
+            
+        return output
+
+
 class CrossAttnFusion(FusionModule):
     """
     Cross-modal transformer fusion module with multitask outputs.
@@ -35,20 +85,30 @@ class CrossAttnFusion(FusionModule):
     """
     
     def __init__(self, d_model: int = 512, n_heads: int = 8, n_layers: int = 3,
-                 mlp_hidden: int = 256, dropout: float = 0.1):
+                 mlp_hidden: int = 256, dropout: float = 0.1, 
+                 dims: dict = None, num_classes: int = 100):
         super().__init__(out_dim=512)
+        
+        # Default dimensions if not provided
+        if dims is None:
+            dims = {'zi': 768, 'zt': 512, 'zr': 384, 'e_cls': 32}
         
         self.d_model = d_model
         self.n_heads = n_heads
         self.n_layers = n_layers
+        self.dims = dims
         
         # Input projections for each modality
-        self.i_proj = nn.Linear(768, d_model)  # I-branch: 768 -> 512
-        self.t_proj = nn.Linear(512, d_model)  # T-branch: 512 -> 512  
-        self.r_proj = nn.Linear(384, d_model)  # R-branch: 384 -> 512
+        self.i_proj = nn.Linear(dims['zi'], d_model)  # I-branch: 768 -> 512
+        self.t_proj = nn.Linear(dims['zt'], d_model)  # T-branch: 512 -> 512  
+        self.r_proj = nn.Linear(dims['zr'], d_model)  # R-branch: 384 -> 512
         
-        # Modality embeddings
-        self.modality_embeddings = nn.Parameter(torch.randn(3, d_model))
+        # Class embedding layer
+        self.class_embedding = ClassEmbedding(num_classes, dims['e_cls'])
+        self.cls_proj = nn.Linear(dims['e_cls'], d_model)  # Class: 32 -> 512
+        
+        # Modality embeddings (now 4 modalities: I, T, R, Class)
+        self.modality_embeddings = nn.Parameter(torch.randn(4, d_model))
         
         # Cross-attention transformer layers
         self.transformer_layers = nn.ModuleList([
@@ -98,6 +158,7 @@ class CrossAttnFusion(FusionModule):
                 nn.init.xavier_uniform_(p)
                 
     def forward(self, zi: torch.Tensor, zt: torch.Tensor, zr: torch.Tensor,
+                class_ids: Optional[torch.Tensor] = None,
                 events: Optional[List[EventToken]] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict, List]:
         """
         Forward pass through CrossAttnFusion.
@@ -106,6 +167,7 @@ class CrossAttnFusion(FusionModule):
             zi: I-branch features (B, 768)
             zt: T-branch features (B, 512)
             zr: R-branch features (B, 384)
+            class_ids: Class IDs (B,) - optional
             events: List of events from all modalities
             
         Returns:
@@ -119,17 +181,23 @@ class CrossAttnFusion(FusionModule):
         zt_proj = self.t_proj(zt)  # (B, d_model)
         zr_proj = self.r_proj(zr)  # (B, d_model)
         
-        # Add modality embeddings
-        zi_proj = zi_proj + self.modality_embeddings[0]
-        zt_proj = zt_proj + self.modality_embeddings[1]
-        zr_proj = zr_proj + self.modality_embeddings[2]
+        # Handle class embeddings
+        if class_ids is not None:
+            class_emb = self.class_embedding(class_ids)  # (B, 32)
+            zcls_proj = self.cls_proj(class_emb)  # (B, d_model)
+        else:
+            # Use zero embeddings if no class IDs provided
+            zcls_proj = torch.zeros(B, self.d_model, device=device)
         
-        # Stack modalities as sequence (B, 3, d_model)
-        modality_sequence = torch.stack([zi_proj, zt_proj, zr_proj], dim=1)
+        # Stack modality features (I, T, R, Class)
+        features = torch.stack([zi_proj, zt_proj, zr_proj, zcls_proj], dim=1)  # (B, 4, d_model)
+        
+        # Add modality embeddings to each feature
+        features = features + self.modality_embeddings.unsqueeze(0)  # (B, 4, d_model)
         
         # Apply transformer layers with attention tracking
         attention_maps = {}
-        x = modality_sequence
+        x = features  # (B, 4, d_model)
         
         for i, layer in enumerate(self.transformer_layers):
             x, layer_attn = layer(x)
@@ -170,6 +238,33 @@ class CrossAttnFusion(FusionModule):
         # Simple heuristic: return events with highest confidence
         sorted_events = sorted(events, key=lambda e: e.confidence, reverse=True)
         return sorted_events[:5]  # Top 5 events
+    
+    def get_calibration_features(self, zi: torch.Tensor, zt: torch.Tensor, zr: torch.Tensor,
+                                class_ids: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Get concatenated features for calibration (zi + zt + zr + e_cls).
+        
+        Args:
+            zi: I-branch features (B, 768)
+            zt: T-branch features (B, 512)
+            zr: R-branch features (B, 384)
+            class_ids: Class IDs (B,) - optional
+            
+        Returns:
+            Concatenated features (B, 1696)
+        """
+        # Get class embeddings
+        if class_ids is not None:
+            class_emb = self.class_embedding(class_ids)  # (B, 32)
+        else:
+            B = zi.shape[0]
+            device = zi.device
+            class_emb = torch.zeros(B, self.dims['e_cls'], device=device)
+        
+        # Concatenate all features
+        calibration_features = torch.cat([zi, zt, zr, class_emb], dim=-1)  # (B, 1696)
+        
+        return calibration_features
 
 
 class CrossModalTransformerLayer(nn.Module):

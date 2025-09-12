@@ -67,17 +67,20 @@ class CalibGLM(FusionModule):
     Classical machine learning baseline using scikit-learn for
     outcome prediction from concatenated multimodal features.
     
-    Input: features (B, 1664) - concat(zi, zt, zr) => 768+512+384
+    Input: features (B, 1696) - concat(zi, zt, zr, e_cls) => 768+512+384+32
     Outputs:
         - p_hit_aux (B, 1) - auxiliary hit probability  
         - p_kill_aux (B, 1) - auxiliary kill probability
     """
     
-    def __init__(self, model: str = "logreg", regularization: str = "l2", random_state: int = 42):
+    def __init__(self, in_dim: int = 1696, model: str = "logreg", c: float = 1.0, 
+                 max_iter: int = 200, random_state: int = 42):
         super().__init__(out_dim=2)  # Two outputs: p_hit_aux, p_kill_aux
         
+        self.in_dim = in_dim
         self.model_type = model
-        self.regularization = regularization
+        self.c = c
+        self.max_iter = max_iter
         self.random_state = random_state
         
         # Feature scaler
@@ -98,15 +101,15 @@ class CalibGLM(FusionModule):
         if self.model_type == "logreg":
             # Logistic regression
             self.hit_model = LogisticRegression(
-                penalty=self.regularization,
+                C=self.c,
                 random_state=self.random_state,
-                max_iter=1000,
+                max_iter=self.max_iter,
                 solver='liblinear'
             )
             self.kill_model = LogisticRegression(
-                penalty=self.regularization,
+                C=self.c,
                 random_state=self.random_state,
-                max_iter=1000,
+                max_iter=self.max_iter,
                 solver='liblinear'
             )
         elif self.model_type == "xgboost":
