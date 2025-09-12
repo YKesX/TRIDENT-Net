@@ -96,8 +96,7 @@ class TinyTempoFormer(BranchModule):
         zr3 = self.output_projection(flattened)  # (B, 192)
         
         # Analyze attention patterns for events
-        # events = self._extract_temporal_events(k_tokens, transformer_output, attention_weights)
-        events = []  # TODO: Fix EventToken interface
+        events = self._extract_temporal_events(k_tokens, transformer_output, attention_weights)
         
         return zr3, events
     
@@ -151,14 +150,14 @@ class TinyTempoFormer(BranchModule):
             
             if max_self_attention > 0.7:
                 event = EventToken(
-                    event_type="temporal_persistence",
-                    confidence=max_self_attention.item(),
-                    location=(0, 0),
-                    timestamp=self_attention_scores.argmax().item(),
-                    source="tinytempformer",
-                    metadata={
+                    type="temporal_persistence",
+                    score=max_self_attention.item(),
+                    t_ms=self_attention_scores.argmax().item() * 100,  # Convert to ms
+                    meta={
                         'self_attention_score': max_self_attention.item(),
                         'persistence_time': self_attention_scores.argmax().item(),
+                        'location': (0, 0),
+                        'source': "tinytempformer",
                         'batch_idx': b
                     }
                 )
@@ -176,15 +175,15 @@ class TinyTempoFormer(BranchModule):
                 max_cross_idx = torch.unravel_index(batch_attention_masked.argmax(), batch_attention_masked.shape)
                 
                 event = EventToken(
-                    event_type="temporal_dependency",
-                    confidence=min(1.0, cross_attention.item() / 2.0),
-                    location=(0, 0),
-                    timestamp=max_cross_idx[0].item(),  # Source timestamp
-                    source="tinytempformer",
-                    metadata={
+                    type="temporal_dependency",
+                    score=min(1.0, cross_attention.item() / 2.0),
+                    t_ms=max_cross_idx[0].item() * 100,  # Source timestamp, convert to ms
+                    meta={
                         'cross_attention_sum': cross_attention.item(),
                         'strongest_connection': (max_cross_idx[0].item(), max_cross_idx[1].item()),
                         'connection_strength': batch_attention_masked.max().item(),
+                        'location': (0, 0),
+                        'source': "tinytempformer",
                         'batch_idx': b
                     }
                 )
@@ -200,16 +199,16 @@ class TinyTempoFormer(BranchModule):
                 change_time = 1 if token_diff_01 > token_diff_12 else 2
                 
                 event = EventToken(
-                    event_type="rapid_temporal_change",
-                    confidence=min(1.0, max_change.item() / 10.0),
-                    location=(0, 0),
-                    timestamp=change_time,
-                    source="tinytempformer",
-                    metadata={
+                    type="rapid_temporal_change",
+                    score=min(1.0, max_change.item() / 10.0),
+                    t_ms=change_time * 100,  # Convert to ms
+                    meta={
                         'max_change_magnitude': max_change.item(),
                         'change_01': token_diff_01.item(),
                         'change_12': token_diff_12.item(),
                         'change_time': change_time,
+                        'location': (0, 0),
+                        'source': "tinytempformer",
                         'batch_idx': b
                     }
                 )
@@ -221,15 +220,15 @@ class TinyTempoFormer(BranchModule):
             
             if output_variance > 2.0 or output_magnitude > 8.0:
                 event = EventToken(
-                    event_type="high_temporal_complexity",
-                    confidence=min(1.0, (output_variance.item() + output_magnitude.item()) / 20.0),
-                    location=(0, 0),
-                    timestamp=1,  # Middle of sequence
-                    source="tinytempformer",
-                    metadata={
+                    type="high_temporal_complexity",
+                    score=min(1.0, (output_variance.item() + output_magnitude.item()) / 20.0),
+                    t_ms=100,  # Middle of sequence, convert to ms
+                    meta={
                         'output_variance': output_variance.item(),
                         'output_magnitude': output_magnitude.item(),
                         'temporal_complexity_score': (output_variance + output_magnitude).item(),
+                        'location': (0, 0),
+                        'source': "tinytempformer",
                         'batch_idx': b
                     }
                 )

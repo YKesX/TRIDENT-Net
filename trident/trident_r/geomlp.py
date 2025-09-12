@@ -103,8 +103,7 @@ class GeoMLP(BranchModule):
         feature_importance = self.importance_head(zr2)  # (B, 69)
         
         # Extract MLP-based events
-        # events = self._extract_mlp_events(k_aug, zr2, feature_importance)
-        events = []  # TODO: Fix EventToken interface
+        events = self._extract_mlp_events(k_aug, zr2, feature_importance)
         
         return zr2, events
     
@@ -132,14 +131,14 @@ class GeoMLP(BranchModule):
             position_importance = raw_importance[:, :3].mean()  # avg over x,y,z
             if position_importance > 0.7:
                 event = EventToken(
-                    event_type="spatial_focus",
-                    confidence=position_importance.item(),
-                    location=(0, 0),
-                    timestamp=raw_importance[:, :3].mean(dim=1).argmax().item(),
-                    source="geomlp",
-                    metadata={
+                    type="spatial_focus",
+                    score=position_importance.item(),
+                    t_ms=raw_importance[:, :3].mean(dim=1).argmax().item() * 100,  # Convert to ms
+                    meta={
                         'position_importance': position_importance.item(),
                         'max_position_time': raw_importance[:, :3].mean(dim=1).argmax().item(),
+                        'location': (0, 0),
+                        'source': "geomlp",
                         'batch_idx': b
                     }
                 )
@@ -149,14 +148,14 @@ class GeoMLP(BranchModule):
             velocity_delta_importance = delta_importance[:, 3:6].mean()  # avg over vx,vy,vz deltas
             if velocity_delta_importance > 0.6:
                 event = EventToken(
-                    event_type="velocity_change",
-                    confidence=velocity_delta_importance.item(),
-                    location=(0, 0),
-                    timestamp=delta_importance[:, 3:6].mean(dim=1).argmax().item() + 1,  # +1 for delta timing
-                    source="geomlp",
-                    metadata={
+                    type="velocity_change",
+                    score=velocity_delta_importance.item(),
+                    t_ms=(delta_importance[:, 3:6].mean(dim=1).argmax().item() + 1) * 100,  # +1 for delta timing, convert to ms
+                    meta={
                         'velocity_delta_importance': velocity_delta_importance.item(),
                         'max_delta_time': delta_importance[:, 3:6].mean(dim=1).argmax().item(),
+                        'location': (0, 0),
+                        'source': "geomlp",
                         'batch_idx': b
                     }
                 )
@@ -183,15 +182,15 @@ class GeoMLP(BranchModule):
                 feature_name = physics_feature_names[max_physics_idx.item()] if max_physics_idx < len(physics_feature_names) else f"feature_{max_physics_idx}"
                 
                 event = EventToken(
-                    event_type="physics_anomaly",
-                    confidence=max_physics_importance.item(),
-                    location=(0, 0),
-                    timestamp=2,  # End of sequence for physics analysis
-                    source="geomlp",
-                    metadata={
+                    type="physics_anomaly",
+                    score=max_physics_importance.item(),
+                    t_ms=200,  # End of sequence for physics analysis, convert to ms
+                    meta={
                         'physics_feature': feature_name,
                         'physics_importance': max_physics_importance.item(),
                         'feature_index': max_physics_idx.item(),
+                        'location': (0, 0),
+                        'source': "geomlp",
                         'batch_idx': b
                     }
                 )
@@ -201,15 +200,15 @@ class GeoMLP(BranchModule):
             embedding_magnitude = torch.norm(zr2[b]).item()
             if embedding_magnitude > 10.0:  # High embedding magnitude threshold
                 event = EventToken(
-                    event_type="high_kinematic_complexity",
-                    confidence=min(1.0, embedding_magnitude / 20.0),
-                    location=(0, 0),
-                    timestamp=1,  # Middle of sequence
-                    source="geomlp",
-                    metadata={
+                    type="high_kinematic_complexity",
+                    score=min(1.0, embedding_magnitude / 20.0),
+                    t_ms=100,  # Middle of sequence, convert to ms
+                    meta={
                         'embedding_magnitude': embedding_magnitude,
                         'mean_feature_importance': importance.mean().item(),
                         'max_feature_importance': importance.max().item(),
+                        'location': (0, 0),
+                        'source': "geomlp",
                         'batch_idx': b
                     }
                 )
