@@ -12,7 +12,7 @@ import sys
 sys.path.append('.')
 
 import trident
-from trident.data.synthetic import SyntheticDataset
+from trident.data.dataset import SyntheticDataset
 
 
 def test_synthetic_dataset():
@@ -20,7 +20,7 @@ def test_synthetic_dataset():
     print("🧪 Testing synthetic dataset...")
     
     # Create synthetic dataset
-    dataset = SyntheticDataset(n_samples=10)
+    dataset = SyntheticDataset(size=10)
     
     # Test length
     assert len(dataset) == 10, f"Dataset length mismatch: expected 10, got {len(dataset)}"
