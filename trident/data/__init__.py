@@ -17,6 +17,10 @@ Exports
 - generate_synthetic_batch, synthetic_jsonl: Synthetic utilities.
 """
 
+# Silence Albumentations update check to reduce noisy warnings in tests/CI
+import os as _os
+_os.environ.setdefault("NO_ALBUMENTATIONS_UPDATE", "1")
+
 from .dataset import VideoJsonlDataset, create_data_loaders
 from .transforms import AlbuStereoClip
 from .video_ring import VideoRing

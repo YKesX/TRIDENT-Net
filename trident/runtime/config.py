@@ -9,7 +9,27 @@ from pathlib import Path
 import yaml
 
 try:
-    from pydantic import BaseModel, Field, validator
+    from pydantic import BaseModel, Field
+    try:
+        # Pydantic v2 available
+        from pydantic import field_validator as _p2_field_validator  # type: ignore
+        _PYDANTIC_V2 = True
+    except ImportError:  # v1 fallback
+        from pydantic import validator as _p1_validator  # type: ignore
+        _PYDANTIC_V2 = False
+
+    # Create a version-agnostic decorator factory
+    def _field_validator(*fields, pre: bool = False):  # type: ignore[override]
+        if _PYDANTIC_V2:
+            def _decorator(func):
+                mode = 'before' if pre else 'after'
+                return _p2_field_validator(*fields, mode=mode)(func)
+            return _decorator
+        else:
+            def _decorator(func):
+                return _p1_validator(*fields, pre=pre)(func)
+            return _decorator
+
     PYDANTIC_AVAILABLE = True
 except ImportError:
     # Simple fallback for pydantic
@@ -23,7 +43,7 @@ except ImportError:
     def Field(default=None, **kwargs):
         return default
     
-    def validator(*args, **kwargs):
+    def _field_validator(*args, **kwargs):
         def decorator(func):
             return func
         return decorator
@@ -107,7 +127,7 @@ class TridentConfig(BaseModel):
     tasks: Dict[str, TaskConfig] = Field(default_factory=dict)
     pipelines: Dict[str, PipelineConfig] = Field(default_factory=dict)
     
-    @validator('components', pre=True)
+    @_field_validator('components', pre=True)
     def validate_components(cls, v):
         """Ensure component classes use proper naming."""
         for name, comp in v.items():

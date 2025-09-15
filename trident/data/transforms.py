@@ -120,6 +120,11 @@ class AlbuStereoClip:
             if not name:
                 continue
             params = {k: v for k, v in spec.items() if k != "name"}
+            # Guard against Albumentations version param mismatches
+            if name == "GaussNoise":
+                # Some versions expect var_limit renamed; keep only known args
+                allowed = {"p", "mean", "var_limit"}
+                params = {k: v for k, v in params.items() if k in allowed}
             if not hasattr(A, name):
                 # Ignore unknown ops to remain robust across environments
                 continue

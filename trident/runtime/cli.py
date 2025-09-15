@@ -58,6 +58,7 @@ def command_train(args) -> None:
     config = load_config(args.config)
     
     if not validate_config(config):
+        print("   ❌ Invalid config: expected sections ['components','training','runtime'] per tasks.yml spec")
         sys.exit(1)
     
     print(f"   Environment: Python {config.get('environment', {}).get('python', 'unknown')}")
@@ -65,14 +66,12 @@ def command_train(args) -> None:
     
     if args.synthetic:
         print("   Using synthetic data")
-        
+
         # Test synthetic data generation
         try:
-            # Try importing without torch-dependent modules
-            import sys
+            # Try logic without torch-dependent modules
             import json
-            from pathlib import Path
-            
+
             # Test synthetic JSONL generation logic directly
             sample_data = {
                 'shoot_ms': 1500,
@@ -81,14 +80,13 @@ def command_train(args) -> None:
                 'video': {'path': 'test.mp4', 'rgb_path': 'test_rgb.mp4'},
                 'radar': {'kinematics': [[1,2,3,4,5,6,7,8,9]] * 3}
             }
-            
+
             # Test JSONL serialization
             jsonl_line = json.dumps(sample_data)
-            
+
             print("   ✅ Synthetic data generation logic verified")
             print(f"   ✅ JSONL format: {len(jsonl_line)} chars")
             print(f"   ✅ Timing hierarchy: shoot→hit (kill=None)")
-            
         except Exception as e:
             print(f"   ❌ Synthetic data generation failed: {e}")
     
