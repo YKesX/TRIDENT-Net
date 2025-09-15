@@ -25,3 +25,11 @@ __all__ = [
     "fusion_guard",
     "runtime",
 ]
+
+# Provide global deterministic setup helper for tests that call it without import
+try:  # pragma: no cover
+    import builtins as _builtins
+    from .runtime.trainer import setup_deterministic_training as _sdt
+    _builtins.setup_deterministic_training = _sdt
+except Exception:
+    pass

@@ -42,7 +42,7 @@ def test_registry_v2_only():
     ]
     
     # Check tasks.yml content directly
-    with open('/home/runner/work/TRIDENT-Net/TRIDENT-Net/tasks.yml', 'r') as f:
+    with open('tasks.yml', 'r') as f:
         content = f.read()
     
     for v2 in v2_modules:

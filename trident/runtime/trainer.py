@@ -28,6 +28,27 @@ from ..common.losses import get_loss_fn
 from ..data.dataset import create_data_loaders
 
 
+def setup_deterministic_training(seed: int = 12345, cudnn_deterministic: bool = True, cudnn_benchmark: bool = False) -> None:
+    """Public helper for tests to configure deterministic behavior.
+
+    Mirrors Trainer._setup_deterministic_training but usable without instantiating Trainer.
+    """
+    import random
+    import numpy as np
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    if hasattr(torch, 'use_deterministic_algorithms'):
+        torch.use_deterministic_algorithms(cudnn_deterministic)
+    if torch.backends.cudnn.is_available():
+        torch.backends.cudnn.deterministic = cudnn_deterministic
+        torch.backends.cudnn.benchmark = cudnn_benchmark
+
+
 class Trainer:
     """
     Trainer for TRIDENT-Net components and fusion modules.
