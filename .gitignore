@@ -56,7 +56,7 @@ models/
 *.joblib
 
 # Data
-data/
+
 *.npz
 *.h5
 *.hdf5
