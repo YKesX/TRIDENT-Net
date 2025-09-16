@@ -282,8 +282,8 @@ class CrossAttnFusion(FusionModule):
         if not events or not attention_maps:
             return []
 
-        # Simple heuristic: return events with highest confidence
-        sorted_events = sorted(events, key=lambda e: e.confidence, reverse=True)
+        # Simple heuristic: return events with highest score
+        sorted_events = sorted(events, key=lambda e: getattr(e, "score", 0.0), reverse=True)
         return sorted_events[:5]  # Top 5 events
 
     def get_calibration_features(
@@ -506,7 +506,10 @@ class EventProcessor(nn.Module):
         # Group events by batch
         batch_events: List[List[EventToken]] = [[] for _ in range(batch_size)]
         for event in events:
-            batch_idx = getattr(event.metadata, "batch_idx", 0) if event.metadata else 0
+            # Our EventToken has 'meta' dict; default to 0 if not found
+            batch_idx = 0
+            if hasattr(event, "meta") and isinstance(event.meta, dict):
+                batch_idx = int(event.meta.get("batch_idx", 0))
             if batch_idx < batch_size:
                 batch_events[batch_idx].append(event)
 
@@ -516,26 +519,23 @@ class EventProcessor(nn.Module):
             if not b_events:
                 batch_features.append(torch.zeros(self.d_model, device=device))
             else:
-                # Take most confident event for simplicity
-                top_event = max(b_events, key=lambda e: e.confidence)
+                # Take highest-score event
+                top_event = max(b_events, key=lambda e: getattr(e, "score", 0.0))
 
-                # Get type embedding
-                type_idx = 0  # Default
-                if top_event.event_type in self.event_types:
-                    type_idx = self.event_types.index(top_event.event_type)
-
+                # Map type string to embedding index
+                ev_type = getattr(top_event, "type", "") or ""
+                type_idx = self.event_types.index(ev_type) if ev_type in self.event_types else 0
                 type_emb = self.type_embedding(torch.tensor(type_idx, device=device))
 
-                # Create feature vector
-                location = top_event.location if top_event.location else (0, 0)
-                features = torch.cat(
-                    [
-                        type_emb,
-                        torch.tensor(
-                            [top_event.confidence, location[0] / 640.0, location[1] / 480.0], device=device
-                        ),
-                    ]
-                )
+                # Location from meta if available
+                loc = (0.0, 0.0)
+                if hasattr(top_event, "meta") and isinstance(top_event.meta, dict):
+                    loc = tuple(top_event.meta.get("center_xy", (0.0, 0.0)))
+                score = float(getattr(top_event, "score", 0.0))
+                features = torch.cat([
+                    type_emb,
+                    torch.tensor([score, float(loc[0]) / 640.0, float(loc[1]) / 480.0], device=device),
+                ])
 
                 batch_features.append(self.feature_processor(features))
 

@@ -216,7 +216,7 @@ class PlumeDetXL(nn.Module):
         return nn.ModuleList(layers)
     
     def _make_residual_block(self, in_channels: int, out_channels: int) -> nn.Module:
-        """Create residual block."""
+        """Create residual block and mark it as stage for FPN collection."""
         class ResidualBlock(nn.Module):
             def __init__(self, in_channels: int, out_channels: int):
                 super().__init__()
@@ -225,28 +225,31 @@ class PlumeDetXL(nn.Module):
                 self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
                 self.bn2 = nn.BatchNorm2d(out_channels)
                 self.relu = nn.ReLU(inplace=True)
-                
+
                 # Skip connection
                 self.skip = nn.Identity()
                 if in_channels != out_channels:
                     self.skip = nn.Conv2d(in_channels, out_channels, 1)
-            
+
             def forward(self, x):
                 identity = self.skip(x)
-                
+
                 out = self.conv1(x)
                 out = self.bn1(out)
                 out = self.relu(out)
-                
+
                 out = self.conv2(out)
                 out = self.bn2(out)
-                
+
                 out += identity
                 out = self.relu(out)
-                
+
                 return out
-        
-        return ResidualBlock(in_channels, out_channels)
+
+        block = ResidualBlock(in_channels, out_channels)
+        # Mark this residual block so _extract_features knows it's a stage
+        setattr(block, "is_stage", True)
+        return block
     
     def _get_backbone_channels(self) -> List[int]:
         """Get number of channels at each backbone level."""
@@ -325,67 +328,35 @@ class PlumeDetXL(nn.Module):
         }
     
     def _extract_features(self, frame: torch.Tensor) -> torch.Tensor:
-        """
-        Extract features from single frame.
-        
-        Args:
-            frame: Single frame [B, 1, H, W]
-            
-        Returns:
-            Features [B, D, H', W']
-        """
+        """Extract features from single frame and run FPN if enabled."""
         x = frame
-        backbone_features = []
-        
-        # Forward through backbone
-        for i, layer in enumerate(self.backbone):
-            if isinstance(layer, tuple):
-                # Residual block
-                conv_layers, skip = layer
-                identity = x
-                x = conv_layers(x)
-                if skip is not None:
-                    identity = skip(identity)
-                x = x + identity
-                x = F.relu(x, inplace=True)
-            else:
-                x = layer(x)
-            
-            # Store features for FPN
-            if i > 0 and self.fpn is not None:  # Skip initial conv/pool
+        backbone_features: List[torch.Tensor] = []
+
+        # Forward through backbone and collect stage outputs only
+        for layer in self.backbone:
+            x = layer(x)
+            if self.fpn is not None and getattr(layer, "is_stage", False):
                 backbone_features.append(x)
-        
+
         # Apply FPN if enabled
-        if self.fpn is not None and backbone_features:
-            # Top-down pathway
-            fpn_features = []
-            x = backbone_features[-1]  # Start from top level
-            
+        if self.fpn is not None and len(backbone_features) > 0:
+            fpn_features: List[torch.Tensor] = []
+            # top level
+            x = backbone_features[-1]
             for i in range(len(backbone_features) - 1, -1, -1):
-                # Lateral connection - adjust index for FPN which skips first layer
-                lateral_idx = i  # Use direct index since we collected features from i > 0
-                lateral = self.fpn['lateral'][lateral_idx](backbone_features[i])
-                
-                # Top-down
-                if fpn_features:
-                    # Upsample previous level
+                lateral = self.fpn['lateral'][i](backbone_features[i])
+                if len(fpn_features) > 0:
                     upsampled = F.interpolate(
-                        fpn_features[-1],
-                        size=lateral.shape[-2:],
-                        mode='bilinear',
-                        align_corners=False
+                        fpn_features[-1], size=lateral.shape[-2:], mode='bilinear', align_corners=False
                     )
                     x = lateral + upsampled
                 else:
                     x = lateral
-                
-                # Smooth
-                x = self.fpn['smooth'][lateral_idx](x)
+                x = self.fpn['smooth'][i](x)
                 fpn_features.append(x)
-            
-            # Use middle level features
+            # pick middle level
             x = fpn_features[len(fpn_features) // 2]
-        
+
         return x
     
     def _detect_frame(self, features: torch.Tensor, t_idx: int) -> List[Dict[str, Any]]:

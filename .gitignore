@@ -56,7 +56,8 @@ models/
 *.joblib
 
 # Data
-
+Train/
+Eval/
 *.npz
 *.h5
 *.hdf5
