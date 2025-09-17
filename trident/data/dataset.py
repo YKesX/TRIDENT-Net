@@ -7,6 +7,7 @@ timing windows and optional kinematics and class metadata.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import dataclasses
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -125,7 +126,15 @@ class VideoJsonlDataset(Dataset):
         self.jsonl_path = Path(jsonl_path)
         self.video_root = Path(video_root)
         self.preprocess = preprocess
-        self.fields = DataFields(**(fields_map or {}))
+        # Tolerate extra/unknown keys in fields_map by filtering to known DataFields
+        fm = fields_map or {}
+        try:
+            valid = {f.name for f in dataclasses.fields(DataFields)}
+            fm_filtered = {k: v for k, v in fm.items() if k in valid}
+            self.fields = DataFields(**fm_filtered)
+        except Exception:
+            logger.warning("Invalid fields_map provided; using defaults and ignoring unknown keys.")
+            self.fields = DataFields()
         self.clip_sampler = clip_sampler or {}
 
         # Parse JSONL once

@@ -8,6 +8,7 @@ Author: Yağızhan Keskin
 """
 
 import argparse
+import os
 import logging
 import sys
 from pathlib import Path
@@ -17,6 +18,16 @@ import yaml
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from torch.cuda.amp import autocast, GradScaler
+import shutil
+try:
+    from googleapiclient.discovery import build  # type: ignore
+    from googleapiclient.http import MediaFileUpload  # type: ignore
+    from google.oauth2 import service_account  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    build = None  # type: ignore
+    MediaFileUpload = None  # type: ignore
+    service_account = None  # type: ignore
 
 from ..data.dataset import create_data_loaders
 from ..data.synthetic import generate_synthetic_batch
@@ -27,6 +38,7 @@ from ..trident_r.geomlp import GeoMLP
 from ..trident_r.tiny_temporal_former import TinyTempoFormer
 from ..fusion_guard.cross_attn_fusion import CrossAttnFusion
 from ..common.metrics import compute_metrics, auroc, f1, brier_score, expected_calibration_error
+from datetime import datetime
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -212,13 +224,29 @@ def command_train(args) -> None:
             sources['jsonl_path'] = args.jsonl
         if args.video_root:
             sources['video_root'] = args.video_root
-    # Data
-    if args.synthetic or cfg.get('data', {}).get('synthetic', {}).get('enabled', False):
+    # Apply optional DataLoader overrides from CLI
+    if getattr(args, 'batch_size', None) is not None or getattr(args, 'num_workers', None) is not None or getattr(args, 'pin_memory', None) is not None:
+        d = cfg.setdefault('data', {})
+        ld = d.setdefault('loader', {})
+        if getattr(args, 'batch_size', None) is not None:
+            ld['batch_size'] = int(args.batch_size)
+        if getattr(args, 'num_workers', None) is not None:
+            ld['num_workers'] = int(args.num_workers)
+        if getattr(args, 'pin_memory', None) is not None:
+            ld['pin_memory'] = bool(args.pin_memory)
+
+    # Data: prefer real dataset unless --synthetic explicitly passed
+    use_synth = bool(args.synthetic)
+    if (args.jsonl or args.video_root):
+        use_synth = False
+    if use_synth:
         print("using_synthetic=true")
         train_loader, val_loader = _create_synthetic_loaders(cfg)
     else:
         train_loader, val_loader = create_data_loaders(cfg)
     device = _device()
+    # Diagnostics: report CUDA visibility and selection
+    print(f"device={device} cuda_available={torch.cuda.is_available()} cuda_devices={torch.cuda.device_count()} CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}")
     # Models
     models = _build_models()
     for m in models.values():
@@ -234,9 +262,72 @@ def command_train(args) -> None:
     opt = torch.optim.AdamW([p for p in f2.parameters() if p.requires_grad], lr=float(cfg.get('training', {}).get('optimizer', {}).get('lr', 2e-4)))
     bce = nn.BCELoss()
     hierarchy_w = float(cfg.get('fusion_guard', {}).get('f2', {}).get('loss', {}).get('hierarchy_regularizer', {}).get('weight', 0.2))
+    use_amp = (device.type == 'cuda') and bool(cfg.get('training', {}).get('amp', True))
+    scaler = GradScaler(enabled=use_amp)
 
     max_epochs = int(cfg.get('training', {}).get('epochs', {}).get('train_fusion', 1))
+    # Prepare run directory for checkpoints
+    runs_dir = Path(cfg.get('runtime', {}).get('runs_dir', './runs'))
+    time_tag = datetime.now().strftime('%Y%m%d_%H%M%S')
+    run_dir = runs_dir / f"train_{time_tag}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    best_ckpt_path = run_dir / 'best.ckpt'
+    last_ckpt_path = run_dir / 'last.ckpt'
+    ckpt_policy = getattr(args, 'ckpt_policy', 'both')  # off|best|last_epoch|both|steps
+    ckpt_steps = int(getattr(args, 'ckpt_steps', 0) or 0)
+    drive_root = getattr(args, 'drive_dir', None)
+    drive_run_dir: Optional[Path] = None
+    if drive_root:
+        try:
+            drive_run_dir = Path(drive_root) / run_dir.name
+            drive_run_dir.mkdir(parents=True, exist_ok=True)
+            print(f"drive_mirror_dir={drive_run_dir}")
+        except Exception as e:
+            print(f"drive_mirror_init_failed dir={drive_root} err={e}")
+
+    # Google Drive API (service account) optional
+    drive_api_folder_id = getattr(args, 'drive_api_folder_id', None)
+    drive_sa_path = getattr(args, 'drive_service_account', None)
+    drive_service = None
+    if drive_api_folder_id and drive_sa_path:
+        if service_account is None or build is None or MediaFileUpload is None:
+            print("drive_api_unavailable=true install_hint=pip install google-api-python-client google-auth google-auth-httplib2")
+        else:
+            try:
+                creds = service_account.Credentials.from_service_account_file(
+                    drive_sa_path,
+                    scopes=['https://www.googleapis.com/auth/drive.file']
+                )
+                drive_service = build('drive', 'v3', credentials=creds)
+                print("drive_api_connected=true")
+            except Exception as e:
+                print(f"drive_api_connect_failed err={e}")
+
+    def _mirror_to_drive(local_path: Path):
+        nonlocal drive_run_dir
+        if not drive_run_dir:
+            return
+        try:
+            target = drive_run_dir / local_path.name
+            shutil.copy2(local_path, target)
+            print(f"drive_checkpoint_saved={target}")
+        except Exception as e:
+            print(f"drive_checkpoint_copy_failed src={local_path} err={e}")
+
+    def _upload_to_drive_api(local_path: Path):
+        nonlocal drive_service, drive_api_folder_id
+        if drive_service is None or not drive_api_folder_id:
+            return
+        try:
+            file_metadata = {'name': local_path.name, 'parents': [drive_api_folder_id]}
+            media = MediaFileUpload(str(local_path), resumable=False)
+            drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+            print(f"drive_api_uploaded={local_path.name}")
+        except Exception as e:
+            print(f"drive_api_upload_failed src={local_path} err={e}")
+    print(f"run_dir={run_dir}")
     step = 0
+    best_val_metric = -float('inf')
     for epoch in range(max_epochs):
         for batch in train_loader:  # type: ignore
             # Move tensors to device
@@ -269,15 +360,21 @@ def command_train(args) -> None:
             # Fusion train step
             p_hit, p_kill = None, None
             opt.zero_grad(set_to_none=True)
-            z_fused, p_hit, p_kill, _, _ = f2(zi=zi, zt=zt, zr=zr, class_ids=class_ids)
-            y_hit = batch['labels']['hit']
-            y_kill = batch['labels']['kill']
-            loss = bce(p_hit, y_hit) + bce(p_kill, y_kill)
-            # hierarchy penalty
-            penalty = torch.relu(p_kill - p_hit).mean() * hierarchy_w
-            total = loss + penalty
-            total.backward()
-            opt.step()
+            with autocast(enabled=use_amp):
+                z_fused, p_hit, p_kill, _, _ = f2(zi=zi, zt=zt, zr=zr, class_ids=class_ids)
+                y_hit = batch['labels']['hit']
+                y_kill = batch['labels']['kill']
+                loss = bce(p_hit, y_hit) + bce(p_kill, y_kill)
+                # hierarchy penalty
+                penalty = torch.relu(p_kill - p_hit).mean() * hierarchy_w
+                total = loss + penalty
+            if use_amp:
+                scaler.scale(total).backward()
+                scaler.step(opt)
+                scaler.update()
+            else:
+                total.backward()
+                opt.step()
 
             # Metrics
             try:
@@ -287,8 +384,22 @@ def command_train(args) -> None:
             f1h = f1(y_hit, p_hit)
             step += 1
             print(f"epoch={epoch} step={step} loss={total.item():.4f} AUROC={au:.3f} F1={f1h:.3f}")
+            # Step checkpointing
+            if ckpt_policy == 'steps' and ckpt_steps > 0 and (step % ckpt_steps == 0):
+                step_ckpt = run_dir / f'step_{step:06d}.ckpt'
+                torch.save({
+                    'epoch': epoch,
+                    'step': step,
+                    'model': f2.state_dict(),
+                    'optimizer': opt.state_dict(),
+                    'config': cfg,
+                }, step_ckpt)
+                print(f"checkpoint_saved={step_ckpt}")
+                _mirror_to_drive(step_ckpt)
+                _upload_to_drive_api(step_ckpt)
 
-        # Validation (optional)
+        # End of epoch: run validation if available
+        val_au = float('nan'); val_f1 = float('nan')
         if val_loader is not None:
             with torch.no_grad():
                 preds_h, tgts_h = [], []
@@ -306,11 +417,52 @@ def command_train(args) -> None:
                 if preds_h and tgts_h:
                     ph = torch.cat(preds_h); th = torch.cat(tgts_h)
                     try:
-                        au = auroc(th, ph)
+                        val_au = auroc(th, ph)
                     except Exception:
-                        au = float('nan')
-                    f1h = f1(th, ph)
-                    print(f"val AUROC={au:.3f} F1={f1h:.3f}")
+                        val_au = float('nan')
+                    val_f1 = f1(th, ph)
+                    print(f"val AUROC={val_au:.3f} F1={val_f1:.3f}")
+        # Save checkpoints each epoch per policy
+        if ckpt_policy in ('last_epoch', 'both', 'best', 'steps'):
+            torch.save({
+                'epoch': epoch,
+                'model': f2.state_dict(),
+                'optimizer': opt.state_dict(),
+                'val_auroc': float(val_au),
+                'val_f1': float(val_f1),
+                'config': cfg,
+            }, last_ckpt_path)
+            print(f"checkpoint_saved={last_ckpt_path}")
+            _mirror_to_drive(last_ckpt_path)
+            _upload_to_drive_api(last_ckpt_path)
+        if ckpt_policy in ('last_epoch', 'both'):
+            epoch_ckpt_path = run_dir / f'epoch_{epoch:03d}.ckpt'
+            torch.save({
+                'epoch': epoch,
+                'model': f2.state_dict(),
+                'optimizer': opt.state_dict(),
+                'val_auroc': float(val_au),
+                'val_f1': float(val_f1),
+                'config': cfg,
+            }, epoch_ckpt_path)
+            print(f"checkpoint_saved={epoch_ckpt_path}")
+            _mirror_to_drive(epoch_ckpt_path)
+            _upload_to_drive_api(epoch_ckpt_path)
+        # Update best if metric improved (prefer AUROC; fallback to F1 if AUROC NaN)
+        metric = float(val_au) if not (val_au != val_au) else float(val_f1) if not (val_f1 != val_f1) else None
+        if metric is not None and metric > best_val_metric and ckpt_policy in ('best', 'both', 'last_epoch', 'steps'):
+            best_val_metric = metric
+            torch.save({
+                'epoch': epoch,
+                'model': f2.state_dict(),
+                'optimizer': opt.state_dict(),
+                'val_auroc': float(val_au),
+                'val_f1': float(val_f1),
+                'config': cfg,
+            }, best_ckpt_path)
+            print(f"best_checkpoint_updated={best_ckpt_path} metric={metric:.4f}")
+            _mirror_to_drive(best_ckpt_path)
+            _upload_to_drive_api(best_ckpt_path)
 
 
 def command_eval(args) -> None:
@@ -325,18 +477,56 @@ def command_eval(args) -> None:
         if args.video_root:
             sources['video_root'] = args.video_root
     device = _device()
-    if cfg.get('data', {}).get('synthetic', {}).get('enabled', False):
-        train_loader, val_loader = _create_synthetic_loaders(cfg)
-    else:
+    print(f"device={device} cuda_available={torch.cuda.is_available()} cuda_devices={torch.cuda.device_count()} CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}")
+    # Apply optional DataLoader overrides from CLI
+    cfg = cfg  # ensure local
+    if getattr(args, 'batch_size', None) is not None or getattr(args, 'num_workers', None) is not None or getattr(args, 'pin_memory', None) is not None:
+        d = cfg.setdefault('data', {})
+        ld = d.setdefault('loader', {})
+        if getattr(args, 'batch_size', None) is not None:
+            ld['batch_size'] = int(args.batch_size)
+        if getattr(args, 'num_workers', None) is not None:
+            ld['num_workers'] = int(args.num_workers)
+        if getattr(args, 'pin_memory', None) is not None:
+            ld['pin_memory'] = bool(args.pin_memory)
+    # Prefer real data for eval
+    if args.jsonl or args.video_root:
         train_loader, val_loader = create_data_loaders(cfg)
+    else:
+        # If config explicitly enables synthetic and no overrides, use synthetic, else real
+        if cfg.get('data', {}).get('synthetic', {}).get('enabled', False):
+            train_loader, val_loader = _create_synthetic_loaders(cfg)
+        else:
+            train_loader, val_loader = create_data_loaders(cfg)
     eval_loader: Optional[DataLoader] = val_loader if val_loader is not None else train_loader
     models = _build_models()
     for m in models.values():
         m.to(device)
         m.eval()
 
+    # Load checkpoint into fusion model if available/desired
+    ckpt = None
+    # Add optional CLI arg: --checkpoint
+    # Auto-discover best.ckpt in latest run folder if not provided
+    ckpt_path = getattr(args, 'checkpoint', None)
+    if ckpt_path is None:
+        runs_dir = Path(cfg.get('runtime', {}).get('runs_dir', './runs'))
+        if runs_dir.exists():
+            # find latest train_* folder with best.ckpt
+            candidates = sorted([p for p in runs_dir.glob('train_*') if (p / 'best.ckpt').exists()])
+            if candidates:
+                ckpt_path = str(candidates[-1] / 'best.ckpt')
+    if ckpt_path:
+        try:
+            ckpt = torch.load(ckpt_path, map_location=device)
+            models['f2'].load_state_dict(ckpt['model'])
+            print(f"loaded_checkpoint={ckpt_path}")
+        except Exception as e:
+            print(f"checkpoint_load_failed path={ckpt_path} err={e}")
+
     all_hit, all_kill, tg_hit, tg_kill = [], [], [], []
     steps = 0
+    per_meta: List[Any] = []
     with torch.no_grad():
         for batch in eval_loader:  # type: ignore
             out = _forward_batch(models, batch, device)
@@ -345,6 +535,8 @@ def command_eval(args) -> None:
             if 'labels' in batch:
                 tg_hit.append(batch['labels']['hit'].cpu())
                 tg_kill.append(batch['labels']['kill'].cpu())
+            if 'meta' in batch:
+                per_meta.extend(batch['meta'])
             steps += 1
             # Stream batch metrics if available
             m = out.get('metrics')
@@ -359,7 +551,30 @@ def command_eval(args) -> None:
         except Exception:
             au_h = float('nan'); au_k = float('nan')
         f1_h = f1(th, ph); f1_k = f1(tk, pk)
-        print(f"Final AUROC_hit={au_h:.3f} AUROC_kill={au_k:.3f} F1_hit={f1_h:.3f} F1_kill={f1_k:.3f}")
+        # Accuracies at 0.5 threshold
+        acc_h = ((ph >= 0.5).float() == th.float()).float().mean().item()
+        acc_k = ((pk >= 0.5).float() == tk.float()).float().mean().item()
+        print(f"Final AUROC_hit={au_h:.3f} AUROC_kill={au_k:.3f} F1_hit={f1_h:.3f} F1_kill={f1_k:.3f} ACC_hit={acc_h:.3f} ACC_kill={acc_k:.3f}")
+
+        # Write per-sample predictions to report
+        report_path = Path(getattr(args, 'report', './runs/eval_report.json')).with_suffix('.csv')
+        try:
+            import csv
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(report_path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(['index', 'y_hit', 'y_kill', 'p_hit', 'p_kill', 'rgb_path', 'ir_path', 'scenario'])
+                for i in range(ph.shape[0]):
+                    yh = float(th[i].item()) if i < th.shape[0] else float('nan')
+                    yk = float(tk[i].item()) if i < tk.shape[0] else float('nan')
+                    meta_i = per_meta[i] if i < len(per_meta) else {}
+                    rgbp = meta_i.get('rgb_path') if isinstance(meta_i, dict) else None
+                    irp = meta_i.get('ir_path') if isinstance(meta_i, dict) else None
+                    scen = meta_i.get('scenario') if isinstance(meta_i, dict) else None
+                    writer.writerow([i, yh, yk, float(ph[i].item()), float(pk[i].item()), rgbp, irp, scen])
+            print(f"eval_report={report_path}")
+        except Exception as e:
+            print(f"eval_report_write_failed path={report_path} err={e}")
 
 
 def command_tune(args) -> None:
@@ -445,6 +660,19 @@ def main():
     )
     train_parser.add_argument('--synthetic', action='store_true', help='Use synthetic data')
     train_parser.add_argument('--finaltrain', action='store_true', help='Final training stage')
+    train_parser.add_argument('--drive-dir', default=None, help='Optional Google Drive folder to mirror checkpoints into (local sync path)')
+    train_parser.add_argument('--drive-api-folder-id', default=None, help='Google Drive Folder ID to upload checkpoints via Drive API')
+    train_parser.add_argument('--drive-service-account', default=None, help='Path to Google service account JSON for Drive API upload')
+    # Checkpointing policy
+    train_parser.add_argument('--ckpt-policy', choices=['off','best','last_epoch','both','steps'], default='both', help='Checkpoint saving policy')
+    train_parser.add_argument('--ckpt-steps', type=int, default=0, help='Save checkpoint every N steps when policy=steps')
+    # Loader overrides
+    train_parser.add_argument('--batch-size', type=int, default=None, help='Override data.loader.batch_size')
+    train_parser.add_argument('--num-workers', type=int, default=None, help='Override data.loader.num_workers')
+    pm_group = train_parser.add_mutually_exclusive_group()
+    pm_group.add_argument('--pin-memory', dest='pin_memory', action='store_true', help='Enable DataLoader pin_memory')
+    pm_group.add_argument('--no-pin-memory', dest='pin_memory', action='store_false', help='Disable DataLoader pin_memory')
+    train_parser.set_defaults(pin_memory=None)
     
     # Eval command
     eval_parser = subparsers.add_parser('eval', help='Evaluate models')
@@ -452,6 +680,14 @@ def main():
     eval_parser.add_argument('--jsonl', default=None, help='Override data.sources.jsonl_path')
     eval_parser.add_argument('--video-root', dest='video_root', default=None, help='Override data.sources.video_root')
     eval_parser.add_argument('--report', default='./runs/eval_report.json', help='Report output path')
+    eval_parser.add_argument('--checkpoint', default=None, help='Path to fusion model checkpoint (loads best.ckpt by default)')
+    # Loader overrides
+    eval_parser.add_argument('--batch-size', type=int, default=None, help='Override data.loader.batch_size')
+    eval_parser.add_argument('--num-workers', type=int, default=None, help='Override data.loader.num_workers')
+    pm_group2 = eval_parser.add_mutually_exclusive_group()
+    pm_group2.add_argument('--pin-memory', dest='pin_memory', action='store_true', help='Enable DataLoader pin_memory')
+    pm_group2.add_argument('--no-pin-memory', dest='pin_memory', action='store_false', help='Disable DataLoader pin_memory')
+    eval_parser.set_defaults(pin_memory=None)
     
     # Tune command
     tune_parser = subparsers.add_parser('tune', help='Hyperparameter tuning')

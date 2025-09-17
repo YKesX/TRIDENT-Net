@@ -7,6 +7,7 @@ modality-specific photometric augmentations, temporal jittering, and normalizati
 from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple
+import inspect
 
 import numpy as np
 import torch
@@ -129,6 +130,13 @@ class AlbuStereoClip:
                 # Ignore unknown ops to remain robust across environments
                 continue
             aug_cls = getattr(A, name)
+            # Filter params to those accepted by constructor signature to avoid warnings
+            try:
+                sig = inspect.signature(aug_cls.__init__)
+                allowed_keys = set(sig.parameters.keys()) - {"self", "args", "kwargs"}
+                params = {k: v for k, v in params.items() if k in allowed_keys}
+            except Exception:
+                pass
             ops.append(aug_cls(**params))
         return A.Compose(ops) if ops else A.Compose([])
 
@@ -184,8 +192,12 @@ class AlbuStereoClip:
                 if ir_aug_img.ndim == 2:
                     ir_aug_img = ir_aug_img[:, :, None]
                 ir_img = ir_aug_img
+            # Enforce IR as single-channel
             if ir_img.ndim == 2:
                 ir_img = ir_img[:, :, None]
+            elif ir_img.ndim == 3 and ir_img.shape[2] == 3:
+                # Convert to grayscale by mean to ensure 1 channel for T-branch
+                ir_img = np.mean(ir_img, axis=2, keepdims=True).astype(ir_img.dtype)
             rgb_out.append(rgb_img)
             ir_out.append(ir_img)
 

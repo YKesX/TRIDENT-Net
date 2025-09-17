@@ -16,6 +16,8 @@ import sys
 import threading
 import time
 from pathlib import Path
+import tempfile
+import uuid
 import queue
 from typing import List, Dict, Any
 
@@ -23,7 +25,7 @@ import streamlit as st
 import pandas as pd
 
 # --- Theming ---
-st.set_page_config(page_title="TRIDENT-Net Studio", page_icon="🛰️", layout="wide")
+st.set_page_config(page_title="TRIDENT‑Net Studio", page_icon="🛰️", layout="wide")
 
 APPLE_DARK = {
     "bg": "#0b0b0d",
@@ -37,22 +39,39 @@ APPLE_DARK = {
     "bad": "#ff453a",
 }
 
-def css():
+APPLE_LIGHT = {
+    "bg": "#f5f5f7",
+    "panel": "#ffffff",
+    "muted": "#f2f2f2",
+    "text": "#1d1d1f",
+    "subtle": "#6e6e73",
+    "accent": "#007aff",
+    "good": "#34c759",
+    "warn": "#ff9f0a",
+    "bad": "#ff3b30",
+}
+
+def css(dark: bool):
+    P = APPLE_DARK if dark else APPLE_LIGHT
     st.markdown(
         f"""
         <style>
-        .stApp {{ background: linear-gradient(180deg, {APPLE_DARK['bg']} 0%, #0e0e11 100%); color:{APPLE_DARK['text']}; }}
-        .block-container {{ padding-top: 1.5rem; }}
-        .apple-card {{ background:{APPLE_DARK['panel']}; border-radius: 16px; padding: 16px 20px; border:1px solid {APPLE_DARK['muted']}; box-shadow: 0 8px 24px rgba(0,0,0,0.25); }}
-        .apple-title {{ font-size: 1.25rem; font-weight:600; letter-spacing:0.2px; }}
-        .apple-subtle {{ color:{APPLE_DARK['subtle']}; font-size:0.9rem; }}
-        .metric-pill {{ background:{APPLE_DARK['muted']}; border-radius: 999px; padding: 8px 12px; display:inline-block; margin-right:8px; }}
-        .accent {{ color:{APPLE_DARK['accent']}; }}
-        .good {{ color:{APPLE_DARK['good']}; }}
-        .warn {{ color:{APPLE_DARK['warn']}; }}
-        .bad {{ color:{APPLE_DARK['bad']}; }}
-    .file-grid {{ display:grid; grid-template-columns: repeat(4, minmax(200px,1fr)); gap:12px; }}
-    .file-item {{ background:{APPLE_DARK['muted']}; border:1px solid {APPLE_DARK['panel']}; padding:10px; border-radius:12px; }}
+        .stApp {{ background: linear-gradient(180deg, {P['bg']} 0%, {P['bg']} 100%); color:{P['text']}; }}
+        /* Push content below the top bar/header for visibility */
+        .block-container {{ padding-top: 5.5rem !important; }}
+        .apple-card {{ background:{P['panel']}; border-radius: 16px; padding: 16px 20px; border:1px solid rgba(127,127,127,0.18); box-shadow: 0 8px 24px rgba(0,0,0,0.06); }}
+        .apple-title {{ font-size: 1.2rem; font-weight:600; letter-spacing:0.2px; line-height:1.35; white-space:normal; word-break:break-word; }}
+        .apple-subtle {{ color:{P['subtle']}; font-size:0.95rem; line-height:1.5; white-space:normal; word-break:break-word; }}
+        .metric-pill {{ background: rgba(127,127,127,0.12); border-radius: 999px; padding: 8px 12px; display:inline-block; margin: 4px 8px 4px 0; white-space:nowrap; }}
+        .accent {{ color:{P['accent']}; }}
+        .good {{ color:{P['good']}; }}
+        .warn {{ color:{P['warn']}; }}
+        .bad {{ color:{P['bad']}; }}
+        .file-grid {{ display:grid; grid-template-columns: repeat(4, minmax(200px,1fr)); gap:12px; }}
+        .file-item {{ background:rgba(127,127,127,0.08); border:1px solid rgba(127,127,127,0.18); padding:10px; border-radius:12px; }}
+        /* Make dataframe cells wrap and not clip */
+        .stDataFrame div {{ white-space:normal !important; word-break:break-word !important; }}
+        .stMarkdown p {{ margin-bottom: 0.35rem; }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -106,20 +125,7 @@ def list_videos(root: Path) -> pd.DataFrame:
     return df
 
 
-def simulate_training(stream_placeholder, charts_placeholder, steps=50):
-    import numpy as np
-    logs = []
-    loss = 1.0
-    auroc = 0.5
-    f1 = 0.3
-    for i in range(steps):
-        time.sleep(0.05)
-        loss = max(0.02, loss * 0.97)
-        auroc = min(0.99, auroc + np.random.rand() * 0.01 + 0.01)
-        f1 = min(0.9, f1 + np.random.rand() * 0.015 + 0.005)
-        logs.append({"step": i+1, "loss": loss, "AUROC": auroc, "F1": f1})
-        stream_placeholder.write(f"Step {i+1}: loss {loss:.4f}, AUROC {auroc:.3f}, F1 {f1:.3f}")
-        charts_placeholder.line_chart(pd.DataFrame(logs).set_index("step"))
+# simulate_training removed (unused)
 
 
 def run_cli_and_stream(
@@ -127,6 +133,8 @@ def run_cli_and_stream(
     log_area,
     chart_area,
     stop_flag_key: str,
+    env_overrides: Dict[str, str] | None = None,
+    env_unset: List[str] | None = None,
 ):
     """
     Run a CLI command and stream stdout lines into Streamlit.
@@ -141,6 +149,14 @@ def run_cli_and_stream(
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     env.setdefault("PYTHONIOENCODING", "utf-8")
+    # Remove specific env vars for this run if requested (e.g., clear CUDA mask)
+    if env_unset:
+        for k in env_unset:
+            env.pop(str(k), None)
+    # Apply per-run environment overrides (e.g., force CPU)
+    if env_overrides:
+        for k, v in env_overrides.items():
+            env[str(k)] = str(v)
 
     try:
         proc = subprocess.Popen(
@@ -249,10 +265,8 @@ def run_cli_and_stream(
 
 
 def main():
-    css()
-
-    st.markdown("<div class='apple-title'>TRIDENT‑Net Studio</div>", unsafe_allow_html=True)
-    st.markdown("<div class='apple-subtle'>Select a mode, choose datasets, preview clips, and monitor metrics in real time.</div>", unsafe_allow_html=True)
+    st.markdown("<div class='apple-title'>🛰️ TRIDENT‑Net Studio</div>", unsafe_allow_html=True)
+    st.markdown("<div class='apple-subtle'>Multimodal fusion training & evaluation. Select a mode, choose datasets, preview clips, and monitor metrics in real time.</div>", unsafe_allow_html=True)
 
     with st.container():
         c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
@@ -262,8 +276,11 @@ def main():
             train_dir = st.text_input("Train directory", value=str((Path.cwd() / "Train").resolve()))
         with c3:
             eval_dir = st.text_input("Eval directory", value=str((Path.cwd() / "Eval").resolve()))
-        with c4:
-            theme_ok = st.toggle("Dark mode", value=True, help="Dark mode is enabled by default")
+    with c4:
+        dark_mode = st.toggle("Dark mode", value=True, help="Toggle TRIDENT‑Net Studio dark/light theme")
+
+    # Inject theme CSS after reading toggle
+    css(dark_mode)
 
     # Extra config: tasks.yml path and pipeline variant
     cfg_cols = st.columns([3, 2, 2])
@@ -272,9 +289,64 @@ def main():
     with cfg_cols[1]:
         pipeline = st.selectbox("Pipeline", ["normal", "finaltrain"], index=0, help="Training sub-pipeline for CLI")
     with cfg_cols[2]:
-        use_synth = st.toggle("Use synthetic", value=False)
+        use_synth = st.toggle("Use synthetic", value=False, help="Feed synthetic data batches into the CLI instead of reading dataset folders. Metrics are computed on these synthetic batches (no fake charts).")
 
     st.markdown("---")
+
+    # Loader overrides
+    with st.container():
+        st.markdown("<div class='apple-title'>Loader settings</div>", unsafe_allow_html=True)
+        lc1, lc2, lc3 = st.columns([1,1,1])
+        with lc1:
+            bs_override = st.number_input("Batch size", min_value=1, value=2, step=1)
+        with lc2:
+            nw_override = st.number_input("Workers", min_value=0, value=0, step=1)
+        with lc3:
+            pinmem = st.checkbox("Pin memory", value=False)
+
+    # Checkpointing
+    with st.container():
+        st.markdown("<div class='apple-title'>Checkpointing</div>", unsafe_allow_html=True)
+        ck1, ck2 = st.columns([2,1])
+        with ck1:
+            ckpt_policy = st.selectbox("Policy", ["both", "last_epoch", "best", "steps", "off"], index=0,
+                                       help="Choose when to save checkpoints: best metric, each epoch, both, fixed steps, or off.")
+        with ck2:
+            ckpt_steps = st.number_input("Steps interval", min_value=0, value=0, step=100,
+                                        help="Used only when policy=steps. Save every N steps.")
+
+    # Google Drive (local sync + API upload)
+    with st.container():
+        st.markdown("<div class='apple-title'>Google Drive</div>", unsafe_allow_html=True)
+        gd1, gd2 = st.columns([2, 2])
+        with gd1:
+            drive_dir = st.text_input("Local Drive sync folder (optional)", value="",
+                                      help="Path to your local Google Drive sync folder; checkpoints will be mirrored there.")
+        with gd2:
+            use_drive_api = st.checkbox("Upload via Drive API (service account)", value=False,
+                                        help="Enable direct upload to a Drive folder using a service account.")
+        api1, api2 = st.columns([2, 2])
+        drive_folder_id = ""
+        service_account_path = None
+        if use_drive_api:
+            with api1:
+                drive_folder_id = st.text_input("Drive Folder ID", value="",
+                                                help="Target folder ID in Google Drive (service account needs access).")
+            with api2:
+                sa_file = st.file_uploader("Service account JSON", type=["json"], accept_multiple_files=False)
+                if sa_file is not None:
+                    # Save uploaded creds to a temp file for this session
+                    if 'drive_sa_temp' not in st.session_state:
+                        st.session_state.drive_sa_temp = None
+                    try:
+                        tmp_path = Path(tempfile.gettempdir()) / f"trident_sa_{uuid.uuid4().hex}.json"
+                        with open(tmp_path, 'wb') as f:
+                            f.write(sa_file.read())
+                        st.session_state.drive_sa_temp = str(tmp_path)
+                        st.caption(f"Saved credentials to: {tmp_path}")
+                    except Exception as e:
+                        st.error(f"Failed to save credentials: {e}")
+                service_account_path = st.session_state.get('drive_sa_temp')
 
     # Dataset preview (Train & Eval)
     with st.container():
@@ -319,6 +391,13 @@ def main():
     left, right = st.columns([2, 3])
     with left:
         st.markdown("<div class='apple-title'>Controls</div>", unsafe_allow_html=True)
+        device_choice = st.radio(
+            "Device",
+            ["CUDA (GPU)", "CPU"],
+            index=0,
+            horizontal=True,
+            help="Select compute device. CPU will run slower but sets CUDA_VISIBLE_DEVICES=-1 only for this run.",
+        )
         run_btn = st.button("Start", type="primary")
         stop_btn = st.button("Stop", type="secondary")
         st.markdown("<div class='apple-subtle'>Start will call TRIDENT runtime CLI with the selected mode and stream logs live.</div>", unsafe_allow_html=True)
@@ -337,6 +416,7 @@ def main():
                 st.markdown("<div class='metric-pill'>Pipeline: <span class='accent'>%s</span></div>" % mode, unsafe_allow_html=True)
                 st.markdown("<div class='metric-pill'>Train: %s</div>" % train_dir, unsafe_allow_html=True)
                 st.markdown("<div class='metric-pill'>Eval: %s</div>" % eval_dir, unsafe_allow_html=True)
+                st.markdown("<div class='metric-pill'>Device: %s</div>" % ("CPU" if device_choice == "CPU" else "CUDA (GPU)"), unsafe_allow_html=True)
             # Build command
             py = sys.executable
             if mode == "train" or mode == "finaltrain":
@@ -347,6 +427,20 @@ def main():
                 ]
                 if use_synth:
                     cmd.append("--synthetic")
+                # Loader overrides
+                cmd += ["--batch-size", str(int(bs_override)), "--num-workers", str(int(nw_override))]
+                cmd += (["--pin-memory"] if pinmem else ["--no-pin-memory"])
+                # Checkpointing
+                cmd += ["--ckpt-policy", ckpt_policy]
+                if ckpt_policy == "steps" and int(ckpt_steps) > 0:
+                    cmd += ["--ckpt-steps", str(int(ckpt_steps))]
+                # Google Drive mirror
+                if drive_dir.strip():
+                    cmd += ["--drive-dir", drive_dir.strip()]
+                # Google Drive API upload
+                if use_drive_api and drive_folder_id.strip() and service_account_path:
+                    cmd += ["--drive-api-folder-id", drive_folder_id.strip(),
+                            "--drive-service-account", service_account_path]
                 # Dataset overrides
                 t_prompts = str((Path(train_dir) / "prompts.jsonl").resolve())
                 if Path(t_prompts).exists():
@@ -359,6 +453,9 @@ def main():
                 ]
                 if use_synth:
                     cmd.append("--synthetic")
+                # Loader overrides
+                cmd += ["--batch-size", str(int(bs_override)), "--num-workers", str(int(nw_override))]
+                cmd += (["--pin-memory"] if pinmem else ["--no-pin-memory"])
                 e_prompts = str((Path(eval_dir) / "prompts.jsonl").resolve())
                 if Path(e_prompts).exists():
                     cmd += ["--jsonl", e_prompts]
@@ -366,7 +463,10 @@ def main():
             else:
                 cmd = [py, "-m", "trident.runtime.cli", mode, "--config", config_path]
 
-            run_cli_and_stream(cmd, stream, charts, stop_flag_key='stop_flag')
+            # Per-run environment overrides
+            overrides = {"CUDA_VISIBLE_DEVICES": "-1"} if device_choice == "CPU" else None
+            unset = ["CUDA_VISIBLE_DEVICES"] if device_choice != "CPU" else None
+            run_cli_and_stream(cmd, stream, charts, stop_flag_key='stop_flag', env_overrides=overrides, env_unset=unset)
 
         if stop_btn and st.session_state.get('proc'):
             st.session_state.stop_flag = True
@@ -378,11 +478,11 @@ def main():
             st.caption("Loss and AUROC over time")
             st.empty()  # Avoid empty chart warnings; charts update in left column
         with tabs[1]:
-            st.caption("Confusion matrix (simulated)")
-            st.image("https://dummyimage.com/600x240/151518/ffffff&text=Confusion+Matrix", width='stretch')
+            st.caption("Confusion matrix")
+            st.info("Will appear here when implemented in CLI outputs.")
         with tabs[2]:
-            st.caption("Reliability diagram (simulated)")
-            st.image("https://dummyimage.com/600x240/151518/ffffff&text=Reliability+Diagram", width='stretch')
+            st.caption("Calibration")
+            st.info("Will appear here when implemented in CLI outputs.")
 
 
 if __name__ == "__main__":

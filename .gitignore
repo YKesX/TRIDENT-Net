@@ -63,7 +63,7 @@ Eval/
 *.hdf5
 *.csv
 *.json
-*.txt
+
 
 # Logs
 *.log
