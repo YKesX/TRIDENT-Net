@@ -313,12 +313,20 @@ class MemoryEfficientTrainer(Trainer):
         
         # Debug: Log what batch size we're using
         self.logger.info(f"Using batch_size={batch_size} for DeepSpeed config (from config_loader.raw_config)")
+        self.logger.info(f"grad_accum_steps={self.grad_accum_steps}")
         
-        # Calculate micro batch size per GPU
-        micro_batch_per_gpu = max(1, batch_size // self.grad_accum_steps)
+        # For DeepSpeed, we need to ensure the relationship:
+        # train_batch_size = micro_batch_per_gpu * gradient_accumulation_steps * world_size
+        # When user sets batch_size=1, this should be the micro_batch_per_gpu, not train_batch_size
+        world_size = 1  # Single GPU training
+        micro_batch_per_gpu = batch_size  # Use the batch_size as micro_batch_per_gpu
+        train_batch_size = micro_batch_per_gpu * self.grad_accum_steps * world_size
         
-        return {
-            "train_batch_size": batch_size,
+        self.logger.info(f"DeepSpeed calculation: micro_batch_per_gpu={micro_batch_per_gpu}, "
+                        f"train_batch_size={train_batch_size} (={micro_batch_per_gpu}*{self.grad_accum_steps}*{world_size})")
+        
+        ds_config = {
+            "train_batch_size": train_batch_size,
             "micro_batch_per_gpu": micro_batch_per_gpu,
             "gradient_accumulation_steps": self.grad_accum_steps,
             "bf16": {
@@ -338,6 +346,9 @@ class MemoryEfficientTrainer(Trainer):
             "gradient_clipping": self.gradient_clip_norm,
             "steps_per_print": 10
         }
+        
+        self.logger.info(f"Final DeepSpeed config: {ds_config}")
+        return ds_config
 
     def _apply_qlora(self, model: nn.Module) -> nn.Module:
         """Apply QLoRA to Transformer blocks in the model."""

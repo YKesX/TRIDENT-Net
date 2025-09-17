@@ -52,6 +52,7 @@ def command_train_memory_efficient(args) -> None:
     # Debug: Log the configuration being used
     print(f"Configuration after overrides: batch_size={cfg.get('data', {}).get('loader', {}).get('batch_size', 'not set')}")
     print(f"Raw config batch_size={config_loader.raw_config.get('data', {}).get('loader', {}).get('batch_size', 'not set')}")
+    print(f"Gradient accumulation steps: {args.grad_accum_steps}")
     
     # Data loaders
     use_synth = bool(args.synthetic)
