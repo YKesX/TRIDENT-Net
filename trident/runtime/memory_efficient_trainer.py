@@ -268,6 +268,9 @@ class MemoryEfficientTrainer(Trainer):
         else:
             ds_config = self.deepspeed_config or self._get_default_deepspeed_config()
         
+        # Debug: Log the DeepSpeed configuration
+        self.logger.info(f"DeepSpeed config being used: {ds_config}")
+        
         # Initialize DeepSpeed
         model_engine, optimizer, _, _ = deepspeed.initialize(
             model=model,
@@ -308,8 +311,15 @@ class MemoryEfficientTrainer(Trainer):
         if hasattr(self.config_loader, 'raw_config') and self.config_loader.raw_config:
             batch_size = self.config_loader.raw_config.get('data', {}).get('loader', {}).get('batch_size', 2)
         
+        # Debug: Log what batch size we're using
+        self.logger.info(f"Using batch_size={batch_size} for DeepSpeed config (from config_loader.raw_config)")
+        
+        # Calculate micro batch size per GPU
+        micro_batch_per_gpu = max(1, batch_size // self.grad_accum_steps)
+        
         return {
             "train_batch_size": batch_size,
+            "micro_batch_per_gpu": micro_batch_per_gpu,
             "gradient_accumulation_steps": self.grad_accum_steps,
             "bf16": {
                 "enabled": self.use_bf16

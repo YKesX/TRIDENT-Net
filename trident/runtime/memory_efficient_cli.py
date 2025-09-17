@@ -40,10 +40,18 @@ def command_train_memory_efficient(args) -> None:
     # Override DataLoader settings
     if hasattr(args, 'batch_size') and args.batch_size is not None:
         cfg.setdefault('data', {}).setdefault('loader', {})['batch_size'] = args.batch_size
+        # Also update the raw_config so the trainer can access it
+        config_loader.raw_config.setdefault('data', {}).setdefault('loader', {})['batch_size'] = args.batch_size
     if hasattr(args, 'num_workers') and args.num_workers is not None:
         cfg.setdefault('data', {}).setdefault('loader', {})['num_workers'] = args.num_workers
+        config_loader.raw_config.setdefault('data', {}).setdefault('loader', {})['num_workers'] = args.num_workers
     if hasattr(args, 'pin_memory') and args.pin_memory is not None:
         cfg.setdefault('data', {}).setdefault('loader', {})['pin_memory'] = args.pin_memory
+        config_loader.raw_config.setdefault('data', {}).setdefault('loader', {})['pin_memory'] = args.pin_memory
+    
+    # Debug: Log the configuration being used
+    print(f"Configuration after overrides: batch_size={cfg.get('data', {}).get('loader', {}).get('batch_size', 'not set')}")
+    print(f"Raw config batch_size={config_loader.raw_config.get('data', {}).get('loader', {}).get('batch_size', 'not set')}")
     
     # Data loaders
     use_synth = bool(args.synthetic)
