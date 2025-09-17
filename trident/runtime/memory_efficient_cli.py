@@ -25,7 +25,8 @@ def command_train_memory_efficient(args) -> None:
     
     # Load config
     cfg = load_config(args.config)
-    config_loader = ConfigLoader(cfg)
+    config_loader = ConfigLoader()
+    config_loader.config = cfg
     
     # Override data sources if provided
     if args.jsonl or args.video_root:
