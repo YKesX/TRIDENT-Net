@@ -38,7 +38,13 @@ librosa
 pydantic
 attrs
 typing-extensions
-torch==2.8.0
-torchvision
-torchaudio
+torch>=2.0.0
+torchvision>=0.15.0
+torchaudio>=2.0.0
 albumentations>=1.4.0
+
+# Memory optimization dependencies
+bitsandbytes>=0.41.0
+accelerate>=0.20.0
+deepspeed>=0.9.0
+transformers>=4.30.0
