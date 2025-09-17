@@ -303,8 +303,13 @@ class MemoryEfficientTrainer(Trainer):
 
     def _get_default_deepspeed_config(self) -> Dict:
         """Get default DeepSpeed configuration for ZeRO-2 offload."""
+        # Get batch size from configuration, falling back to default
+        batch_size = 2  # Default fallback
+        if hasattr(self.config_loader, 'raw_config') and self.config_loader.raw_config:
+            batch_size = self.config_loader.raw_config.get('data', {}).get('loader', {}).get('batch_size', 2)
+        
         return {
-            "train_batch_size": 2,
+            "train_batch_size": batch_size,
             "gradient_accumulation_steps": self.grad_accum_steps,
             "bf16": {
                 "enabled": self.use_bf16
