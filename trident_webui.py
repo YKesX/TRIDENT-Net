@@ -375,7 +375,7 @@ def stop_process():
 
 def start_training(
     mode: str, train_dir: str, eval_dir: str, config_path: str, pipeline: str,
-    use_synth: bool, batch_size: int, num_workers: int, pin_memory: bool,
+    training_engine: str, use_synth: bool, batch_size: int, num_workers: int, pin_memory: bool,
     ckpt_policy: str, ckpt_steps: int, drive_dir: str, use_drive_api: bool,
     drive_folder_id: str, device_choice: str
 ) -> str:
@@ -387,12 +387,33 @@ def start_training(
     
     # Build command
     py = sys.executable
+    
+    # Choose CLI module based on training engine
+    if training_engine == "Memory-Efficient":
+        cli_module = "trident.runtime.memory_efficient_cli"
+    else:
+        cli_module = "trident.runtime.cli"
+    
     if mode == "train" or mode == "finaltrain":
-        cmd = [
-            py, "-m", "trident.runtime.cli", "train",
-            "--config", config_path,
-            "--pipeline", pipeline,
-        ]
+        if training_engine == "Memory-Efficient":
+            # Use memory-efficient CLI
+            cmd = [
+                py, "-m", cli_module,
+                "--config", config_path,
+                "--use-bf16",  # Enable BF16 by default
+                "--checkpoint-every-layer",  # Enable checkpointing
+                "--grad-accum-steps", "8",  # Default gradient accumulation
+                "--optimizer", "adamw8bit",  # Use 8-bit optimizer
+                "--zero-stage", "2",  # DeepSpeed ZeRO-2 by default
+            ]
+        else:
+            # Use standard CLI
+            cmd = [
+                py, "-m", cli_module, "train",
+                "--config", config_path,
+                "--pipeline", pipeline,
+            ]
+        
         if use_synth:
             cmd.append("--synthetic")
         
@@ -400,19 +421,21 @@ def start_training(
         cmd += ["--batch-size", str(int(batch_size)), "--num-workers", str(int(num_workers))]
         cmd += (["--pin-memory"] if pin_memory else ["--no-pin-memory"])
         
-        # Checkpointing
-        cmd += ["--ckpt-policy", ckpt_policy]
-        if ckpt_policy == "steps" and int(ckpt_steps) > 0:
-            cmd += ["--ckpt-steps", str(int(ckpt_steps))]
-        
-        # Google Drive mirror
-        if drive_dir.strip():
-            cmd += ["--drive-dir", drive_dir.strip()]
-        
-        # Google Drive API upload
-        if use_drive_api and drive_folder_id.strip() and app_state.drive_sa_temp:
-            cmd += ["--drive-api-folder-id", drive_folder_id.strip(),
-                    "--drive-service-account", app_state.drive_sa_temp]
+        # Standard CLI specific options
+        if training_engine == "Standard":
+            # Checkpointing
+            cmd += ["--ckpt-policy", ckpt_policy]
+            if ckpt_policy == "steps" and int(ckpt_steps) > 0:
+                cmd += ["--ckpt-steps", str(int(ckpt_steps))]
+            
+            # Google Drive mirror
+            if drive_dir.strip():
+                cmd += ["--drive-dir", drive_dir.strip()]
+            
+            # Google Drive API upload
+            if use_drive_api and drive_folder_id.strip() and app_state.drive_sa_temp:
+                cmd += ["--drive-api-folder-id", drive_folder_id.strip(),
+                        "--drive-service-account", app_state.drive_sa_temp]
         
         # Dataset overrides
         t_prompts = str((Path(train_dir) / "prompts.jsonl").resolve())
@@ -421,8 +444,14 @@ def start_training(
         cmd += ["--video-root", str(Path(train_dir).resolve())]
         
     elif mode == "eval":
+        if training_engine == "Memory-Efficient":
+            # Note: Evaluation with memory-efficient engine is not fully supported yet
+            # Fall back to standard CLI for evaluation
+            cli_module = "trident.runtime.cli"
+            app_state.last_output = "⚠️ Note: Using Standard engine for evaluation (Memory-Efficient eval not yet supported)"
+        
         cmd = [
-            py, "-m", "trident.runtime.cli", "eval",
+            py, "-m", cli_module, "eval",
             "--config", config_path,
         ]
         if use_synth:
@@ -432,12 +461,15 @@ def start_training(
         cmd += ["--batch-size", str(int(batch_size)), "--num-workers", str(int(num_workers))]
         cmd += (["--pin-memory"] if pin_memory else ["--no-pin-memory"])
         
+        # The CLI automatically loads the best checkpoint from the latest training run
+        # No need to specify --checkpoint parameter
+        
         e_prompts = str((Path(eval_dir) / "prompts.jsonl").resolve())
         if Path(e_prompts).exists():
             cmd += ["--jsonl", e_prompts]
         cmd += ["--video-root", str(Path(eval_dir).resolve())]
     else:
-        cmd = [py, "-m", "trident.runtime.cli", mode, "--config", config_path]
+        cmd = [py, "-m", cli_module, mode, "--config", config_path]
     
     # Per-run environment overrides
     overrides = {"CUDA_VISIBLE_DEVICES": "-1"} if device_choice == "CPU" else None
@@ -514,10 +546,51 @@ def create_interface():
                     label="Pipeline"
                 )
             with gr.Column(scale=2):
+                training_engine = gr.Dropdown(
+                    choices=["Standard", "Memory-Efficient"],
+                    value="Standard",
+                    label="Training Engine",
+                    info="Choose between standard training pipeline or memory-efficient training with optimizations"
+                )
+            with gr.Column(scale=2):
                 use_synth = gr.Checkbox(
                     value=False,
                     label="Use synthetic"
                 )
+        
+        # Memory-efficient training info panel
+        memory_info = gr.HTML(
+            value="",
+            visible=False
+        )
+        
+        def update_memory_info(engine):
+            if engine == "Memory-Efficient":
+                return gr.update(
+                    value="""
+                    <div style="background: #e3f2fd; padding: 15px; border-radius: 8px; margin: 10px 0; border-left: 4px solid #2196f3;">
+                        <h4 style="margin: 0 0 10px 0; color: #1976d2;">🧠 Memory-Efficient Training Active</h4>
+                        <p style="margin: 5px 0; color: #424242;">This mode enables several optimizations for GPU memory constraints:</p>
+                        <ul style="margin: 5px 0; color: #424242;">
+                            <li><strong>BF16 Mixed Precision:</strong> ~50% memory reduction</li>
+                            <li><strong>Activation Checkpointing:</strong> Trade computation for memory</li>
+                            <li><strong>8-bit Optimizers:</strong> AdamW8bit for reduced optimizer states</li>
+                            <li><strong>DeepSpeed ZeRO-2:</strong> CPU optimizer offload</li>
+                            <li><strong>Gradient Accumulation:</strong> Micro-batching (8 steps default)</li>
+                        </ul>
+                        <p style="margin: 5px 0; color: #424242;"><em>Ideal for training on single GPU with &lt;39GB VRAM (e.g., A100-40GB).</em></p>
+                    </div>
+                    """,
+                    visible=True
+                )
+            else:
+                return gr.update(value="", visible=False)
+        
+        training_engine.change(
+            update_memory_info,
+            inputs=[training_engine],
+            outputs=[memory_info]
+        )
         
         gr.HTML("<hr>")
         
@@ -651,7 +724,7 @@ def create_interface():
             start_training,
             inputs=[
                 mode, train_dir, eval_dir, config_path, pipeline,
-                use_synth, batch_size, num_workers, pin_memory,
+                training_engine, use_synth, batch_size, num_workers, pin_memory,
                 ckpt_policy, ckpt_steps, drive_dir, use_drive_api,
                 drive_folder_id, device_choice
             ],

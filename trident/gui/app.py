@@ -283,13 +283,35 @@ def main():
     css(dark_mode)
 
     # Extra config: tasks.yml path and pipeline variant
-    cfg_cols = st.columns([3, 2, 2])
+    cfg_cols = st.columns([3, 2, 2, 2])
     with cfg_cols[0]:
         config_path = st.text_input("Config (tasks.yml)", value=str((Path.cwd() / "tasks.yml").resolve()))
     with cfg_cols[1]:
         pipeline = st.selectbox("Pipeline", ["normal", "finaltrain"], index=0, help="Training sub-pipeline for CLI")
     with cfg_cols[2]:
+        training_engine = st.selectbox(
+            "Training Engine", 
+            ["Standard", "Memory-Efficient"], 
+            index=0, 
+            help="Choose between standard training pipeline or memory-efficient training with optimizations (BF16, checkpointing, 8-bit optimizers)"
+        )
+    with cfg_cols[3]:
         use_synth = st.toggle("Use synthetic", value=False, help="Feed synthetic data batches into the CLI instead of reading dataset folders. Metrics are computed on these synthetic batches (no fake charts).")
+
+    # Memory-efficient training info
+    if training_engine == "Memory-Efficient":
+        st.info("""
+        🧠 **Memory-Efficient Training Active**
+        
+        This mode enables several optimizations for GPU memory constraints:
+        • **BF16 Mixed Precision**: ~50% memory reduction
+        • **Activation Checkpointing**: Trade computation for memory
+        • **8-bit Optimizers**: AdamW8bit for reduced optimizer states
+        • **DeepSpeed ZeRO-2**: CPU optimizer offload
+        • **Gradient Accumulation**: Micro-batching (8 steps default)
+        
+        Ideal for training on single GPU with <39GB VRAM (e.g., A100-40GB).
+        """)
 
     st.markdown("---")
 
@@ -414,41 +436,71 @@ def main():
         if run_btn and not st.session_state.get('proc'):
             with stream:
                 st.markdown("<div class='metric-pill'>Pipeline: <span class='accent'>%s</span></div>" % mode, unsafe_allow_html=True)
+                st.markdown("<div class='metric-pill'>Engine: <span class='accent'>%s</span></div>" % training_engine, unsafe_allow_html=True)
                 st.markdown("<div class='metric-pill'>Train: %s</div>" % train_dir, unsafe_allow_html=True)
                 st.markdown("<div class='metric-pill'>Eval: %s</div>" % eval_dir, unsafe_allow_html=True)
                 st.markdown("<div class='metric-pill'>Device: %s</div>" % ("CPU" if device_choice == "CPU" else "CUDA (GPU)"), unsafe_allow_html=True)
             # Build command
             py = sys.executable
+            
+            # Choose CLI module based on training engine
+            if training_engine == "Memory-Efficient":
+                cli_module = "trident.runtime.memory_efficient_cli"
+            else:
+                cli_module = "trident.runtime.cli"
+            
             if mode == "train" or mode == "finaltrain":
-                cmd = [
-                    py, "-m", "trident.runtime.cli", "train",
-                    "--config", config_path,
-                    "--pipeline", pipeline,
-                ]
+                if training_engine == "Memory-Efficient":
+                    # Use memory-efficient CLI
+                    cmd = [
+                        py, "-m", cli_module,
+                        "--config", config_path,
+                        "--use-bf16",  # Enable BF16 by default
+                        "--checkpoint-every-layer",  # Enable checkpointing
+                        "--grad-accum-steps", "8",  # Default gradient accumulation
+                        "--optimizer", "adamw8bit",  # Use 8-bit optimizer
+                        "--zero-stage", "2",  # DeepSpeed ZeRO-2 by default
+                    ]
+                else:
+                    # Use standard CLI
+                    cmd = [
+                        py, "-m", cli_module, "train",
+                        "--config", config_path,
+                        "--pipeline", pipeline,
+                    ]
+                
                 if use_synth:
                     cmd.append("--synthetic")
                 # Loader overrides
                 cmd += ["--batch-size", str(int(bs_override)), "--num-workers", str(int(nw_override))]
                 cmd += (["--pin-memory"] if pinmem else ["--no-pin-memory"])
-                # Checkpointing
-                cmd += ["--ckpt-policy", ckpt_policy]
-                if ckpt_policy == "steps" and int(ckpt_steps) > 0:
-                    cmd += ["--ckpt-steps", str(int(ckpt_steps))]
-                # Google Drive mirror
-                if drive_dir.strip():
-                    cmd += ["--drive-dir", drive_dir.strip()]
-                # Google Drive API upload
-                if use_drive_api and drive_folder_id.strip() and service_account_path:
-                    cmd += ["--drive-api-folder-id", drive_folder_id.strip(),
-                            "--drive-service-account", service_account_path]
+                
+                # Standard CLI specific options
+                if training_engine == "Standard":
+                    # Checkpointing
+                    cmd += ["--ckpt-policy", ckpt_policy]
+                    if ckpt_policy == "steps" and int(ckpt_steps) > 0:
+                        cmd += ["--ckpt-steps", str(int(ckpt_steps))]
+                    # Google Drive mirror
+                    if drive_dir.strip():
+                        cmd += ["--drive-dir", drive_dir.strip()]
+                    # Google Drive API upload
+                    if use_drive_api and drive_folder_id.strip() and service_account_path:
+                        cmd += ["--drive-api-folder-id", drive_folder_id.strip(),
+                                "--drive-service-account", service_account_path]
+                
                 # Dataset overrides
                 t_prompts = str((Path(train_dir) / "prompts.jsonl").resolve())
                 if Path(t_prompts).exists():
                     cmd += ["--jsonl", t_prompts]
                 cmd += ["--video-root", str(Path(train_dir).resolve())]
             elif mode == "eval":
+                if training_engine == "Memory-Efficient":
+                    st.warning("⚠️ Evaluation mode not yet supported with Memory-Efficient engine. Using Standard engine for eval.")
+                    cli_module = "trident.runtime.cli"
+                
                 cmd = [
-                    py, "-m", "trident.runtime.cli", "eval",
+                    py, "-m", cli_module, "eval",
                     "--config", config_path,
                 ]
                 if use_synth:
