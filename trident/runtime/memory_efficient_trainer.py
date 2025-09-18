@@ -2,7 +2,7 @@
 Memory-efficient training functionality for TRIDENT-Net.
 
 Implements various memory optimization strategies:
-- BF16 mixed precision
+- FP16 mixed precision
 - Activation checkpointing 
 - PyTorch SDPA for attention
 - 8-bit optimizers
@@ -69,7 +69,7 @@ class MemoryEfficientTrainer(Trainer):
     Memory-efficient trainer for TRIDENT-Net with multiple optimization strategies.
     
     Supports:
-    - BF16 mixed precision (global)
+    - FP16 mixed precision (global)
     - Activation checkpointing for heavy blocks
     - PyTorch SDPA for attention
     - 8-bit optimizers (AdamW8bit, PagedAdamW8bit)
@@ -83,8 +83,8 @@ class MemoryEfficientTrainer(Trainer):
         self,
         config_loader: ConfigLoader,
         device: Optional[torch.device] = None,
-        mixed_precision_dtype: torch.dtype = torch.bfloat16,
-        use_bf16: bool = True,
+        mixed_precision_dtype: torch.dtype = torch.float16,
+        use_fp16: bool = True,
         use_checkpointing: bool = True,
         checkpoint_modules: List[str] = None,
         use_8bit_optimizer: bool = True,
@@ -105,8 +105,8 @@ class MemoryEfficientTrainer(Trainer):
         Args:
             config_loader: Configuration loader
             device: Device to use (auto-detected if None)
-            mixed_precision_dtype: Data type for mixed precision (bf16/fp16)
-            use_bf16: Enable bf16 mixed precision globally
+            mixed_precision_dtype: Data type for mixed precision (fp16/bf16)
+            use_fp16: Enable fp16 mixed precision globally
             use_checkpointing: Enable activation checkpointing
             checkpoint_modules: List of module patterns to checkpoint
             use_8bit_optimizer: Use bitsandbytes 8-bit optimizer
@@ -128,8 +128,8 @@ class MemoryEfficientTrainer(Trainer):
             **kwargs
         )
         
-        self.use_bf16 = use_bf16 and torch.cuda.is_available()
-        self.mixed_precision_dtype = mixed_precision_dtype if self.use_bf16 else torch.float32
+        self.use_fp16 = use_fp16 and (torch.cuda.is_available() or torch.backends.mps.is_available())
+        self.mixed_precision_dtype = mixed_precision_dtype if self.use_fp16 else torch.float32
         self.use_checkpointing = use_checkpointing
         self.checkpoint_modules = checkpoint_modules or [
             "transformer", "cross_attn", "VideoFrag3D", "TinyTempoFormer", 
@@ -152,13 +152,13 @@ class MemoryEfficientTrainer(Trainer):
         # QLoRA settings
         self.use_qlora = use_qlora and HAS_BITSANDBYTES
         
-        # Setup memory-efficient scaler for BF16
-        if self.use_bf16:
-            # BF16 doesn't need gradient scaling like FP16
-            self.scaler = None
-            self.logger.info(f"Using BF16 mixed precision (dtype: {self.mixed_precision_dtype})")
-        else:
+        # Setup memory-efficient scaler for FP16/FP32
+        if self.use_fp16:
+            # FP16 needs gradient scaling
             self.scaler = GradScaler() if self.device.type == "cuda" else None
+            self.logger.info(f"Using FP16 mixed precision (dtype: {self.mixed_precision_dtype})")
+        else:
+            self.scaler = None
             self.logger.info("Using FP32 precision")
             
         self.logger.info(f"Memory optimizations: "
@@ -345,8 +345,8 @@ class MemoryEfficientTrainer(Trainer):
                     "warmup_num_steps": 100
                 }
             },
-            "bf16": {
-                "enabled": self.use_bf16
+            "fp16": {
+                "enabled": self.use_fp16
             },
             "zero_optimization": {
                 "stage": 2,
@@ -463,8 +463,9 @@ class MemoryEfficientTrainer(Trainer):
                 else:
                     micro_batch[key] = value
             
-            # Forward pass with mixed precision
-            with autocast(device_type="cuda", dtype=self.mixed_precision_dtype, enabled=self.use_bf16):
+            # Forward pass - let DeepSpeed handle mixed precision if enabled
+            if self.use_deepspeed:
+                # DeepSpeed handles mixed precision internally
                 try:
                     outputs = model(**micro_batch)
                 except TypeError as e:
@@ -485,6 +486,30 @@ class MemoryEfficientTrainer(Trainer):
                     self.logger.error(f"Micro batch keys: {list(micro_batch.keys())}")
                     self.logger.error(f"Micro batch shapes: {[(k, v.shape if isinstance(v, torch.Tensor) else type(v)) for k, v in micro_batch.items()]}")
                     raise
+            else:
+                # Use manual mixed precision with autocast
+                device_type = "cuda" if torch.cuda.is_available() else "cpu"
+                with autocast(device_type=device_type, dtype=self.mixed_precision_dtype, enabled=self.use_fp16):
+                    try:
+                        outputs = model(**micro_batch)
+                    except TypeError as e:
+                        # Handle model signature mismatch
+                        self.logger.error(f"Model forward call failed with micro_batch keys: {list(micro_batch.keys())}")
+                        self.logger.error(f"Model signature error: {e}")
+                        
+                        # Try alternative calling patterns
+                        if len(micro_batch) == 1:
+                            # Single input case
+                            key = list(micro_batch.keys())[0]
+                            outputs = model(micro_batch[key])
+                        else:
+                            # Multiple inputs - try positional args
+                            outputs = model(*micro_batch.values())
+                    except Exception as e:
+                        self.logger.error(f"Unexpected error in model forward: {e}")
+                        self.logger.error(f"Micro batch keys: {list(micro_batch.keys())}")
+                        self.logger.error(f"Micro batch shapes: {[(k, v.shape if isinstance(v, torch.Tensor) else type(v)) for k, v in micro_batch.items()]}")
+                        raise
                 
                 # Calculate loss (this would depend on your specific loss function)
                 if isinstance(outputs, dict) and 'loss' in outputs:

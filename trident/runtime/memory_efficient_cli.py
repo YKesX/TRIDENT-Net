@@ -73,7 +73,7 @@ def command_train_memory_efficient(args) -> None:
     trainer = MemoryEfficientTrainer(
         config_loader=config_loader,
         device=device,
-        use_bf16=args.use_bf16,
+        use_fp16=args.use_fp16,
         use_checkpointing=args.checkpoint_every_layer,
         use_8bit_optimizer=args.optimizer in ["adamw8bit", "paged_adamw8bit"],
         optimizer_type=args.optimizer,
@@ -94,7 +94,7 @@ def command_train_memory_efficient(args) -> None:
     f2, optimizer = trainer.prepare_model_for_training(f2, "fusion_f2")
     
     print(f"Memory optimization settings:")
-    print(f"  BF16: {args.use_bf16}")
+    print(f"  FP16: {args.use_fp16}")
     print(f"  Checkpointing: {args.checkpoint_every_layer}")
     print(f"  8-bit optimizer: {args.optimizer}")
     print(f"  Gradient accumulation: {args.grad_accum_steps}")
@@ -152,7 +152,7 @@ def command_train_memory_efficient(args) -> None:
                 
                 # Forward pass
                 with torch.autocast(device_type="cuda", dtype=trainer.mixed_precision_dtype, 
-                                  enabled=trainer.use_bf16):
+                                  enabled=trainer.use_fp16):
                     outputs = f2(**batch)
                     
                     # Collect predictions (this is simplified - would need actual model outputs)
@@ -212,10 +212,10 @@ def add_memory_efficient_args(parser: argparse.ArgumentParser) -> None:
     
     # Memory optimization flags
     mem_group = parser.add_argument_group('Memory Optimization')
-    mem_group.add_argument('--use-bf16', action='store_true', default=True,
-                          help='Enable BF16 mixed precision (default: True)')
-    mem_group.add_argument('--no-bf16', dest='use_bf16', action='store_false',
-                          help='Disable BF16 mixed precision')
+    mem_group.add_argument('--use-fp16', action='store_true', default=True,
+                          help='Enable FP16 mixed precision (default: True)')
+    mem_group.add_argument('--no-fp16', dest='use_fp16', action='store_false',
+                          help='Disable FP16 mixed precision')
     
     mem_group.add_argument('--checkpoint-every-layer', action='store_true', default=True,
                           help='Enable activation checkpointing for heavy layers (default: True)')
