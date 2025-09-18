@@ -11,9 +11,11 @@ from pathlib import Path
 from typing import Dict, Any
 
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import yaml
 
-from .cli import load_config, setup_logging, _device, _build_models, _create_synthetic_loaders
+from .cli import load_config, setup_logging, _device, _build_models, _create_synthetic_loaders, _kin_aug
 from .memory_efficient_trainer import MemoryEfficientTrainer
 from .config import ConfigLoader
 from ..data.dataset import create_data_loaders
@@ -119,8 +121,18 @@ def command_train_memory_efficient(args) -> None:
     # Build models
     models = _build_models()
     
-    # Prepare fusion model for training (F2)
+    # For memory-efficient training, we'll preprocess the data to match f2 expectations
+    # and train only the fusion model (f2) with preprocessed features
     f2 = models['f2']
+    
+    # Move branch models to device for preprocessing (but don't train them)
+    for name, model in models.items():
+        if name != 'f2':  # Don't move f2 yet, it will be handled by trainer
+            if not trainer.use_accelerate:
+                model = model.to(device)
+            model.eval()  # Set to eval mode since we're not training these
+    
+    # Prepare fusion model for training
     f2, optimizer = trainer.prepare_model_for_training(f2, "fusion_f2")
     
     print(f"Memory optimization settings:")
@@ -149,6 +161,44 @@ def command_train_memory_efficient(args) -> None:
     # Training loop
     print(f"Training for {epochs} epochs with memory optimizations...")
     
+    # Preprocessing function to convert raw batch to fusion input format
+    def preprocess_batch_for_fusion(batch, models, device):
+        """Convert raw batch data to format expected by fusion model f2."""
+        with torch.no_grad():
+            # Move inputs to device 
+            rgb = batch['rgb'].to(device)  # [B,3,T,H,W]
+            ir = batch['ir'].to(device)    # [B,1,T,H,W] 
+            kin = batch['kin'].to(device)  # [B,3,9]
+            class_ids = batch.get('class_id', torch.zeros(rgb.shape[0], dtype=torch.long)).to(device)
+            
+            # Process through branch models (no gradients needed)
+            i1_out = models['i1'](rgb)
+            t1_out = models['t1'](ir)
+            r1_feats, _ = models['r1'](kin)
+            
+            # Kinematics augmentation (from _kin_aug function)
+            k_aug, k_tokens = _kin_aug(kin, r1_feats)
+            zr2, _ = models['r2'](k_aug)
+            zr3, _ = models['r3'](k_tokens)
+            
+            # Concat features per architecture specification
+            zi = torch.cat([i1_out['zi'], torch.zeros(rgb.shape[0], 256, device=device)], dim=1)  # 768
+            zt = t1_out['zt']  # 256
+            zt = torch.cat([zt, torch.zeros_like(zt)], dim=1)  # Pad to 512
+            zr = torch.cat([zr2, zr3], dim=1)  # 384 (192+192)
+            
+            # Prepare fusion inputs
+            fusion_batch = {
+                'zi': zi,
+                'zt': zt, 
+                'zr': zr,
+                'class_ids': class_ids,
+                'events': None,  # Events would be collected from branch outputs
+                'labels': batch.get('labels')  # Pass through labels for loss computation
+            }
+            
+            return fusion_batch
+    
     best_val_metric = 0.0
     for epoch in range(epochs):
         print(f"\nEpoch {epoch+1}/{epochs}")
@@ -158,13 +208,11 @@ def command_train_memory_efficient(args) -> None:
         train_metrics = {'loss': 0.0, 'count': 0}
         
         for step, batch in enumerate(train_loader):
-            # Move batch to device (if not using accelerate)
-            if not trainer.use_accelerate:
-                batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
-                        for k, v in batch.items()}
+            # Preprocess batch to fusion format
+            fusion_batch = preprocess_batch_for_fusion(batch, models, device)
             
-            # Training step
-            step_metrics = trainer.training_step(f2, batch, optimizer, step)
+            # Training step on preprocessed batch
+            step_metrics = trainer.training_step(f2, fusion_batch, optimizer, step)
             
             # Accumulate metrics
             train_metrics['loss'] += step_metrics['loss']
@@ -186,27 +234,44 @@ def command_train_memory_efficient(args) -> None:
         
         with torch.no_grad():
             for batch in val_loader:
-                if not trainer.use_accelerate:
-                    batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
-                            for k, v in batch.items()}
+                # Preprocess batch to fusion format
+                fusion_batch = preprocess_batch_for_fusion(batch, models, device)
                 
                 # Forward pass
                 with torch.autocast(device_type="cuda", dtype=trainer.mixed_precision_dtype, 
                                   enabled=trainer.use_fp16):
-                    outputs = f2(**batch)
+                    outputs = f2(**{k: v for k, v in fusion_batch.items() if k != 'labels'})
                     
-                    # Collect predictions (this is simplified - would need actual model outputs)
-                    if hasattr(outputs, 'p_hit'):
+                    # Collect predictions
+                    if isinstance(outputs, tuple):
+                        z_fused, p_hit, p_kill = outputs[:3]
+                        preds_h.append(p_hit.cpu())
+                        preds_k.append(p_kill.cpu())
+                    elif isinstance(outputs, dict):
+                        if 'p_hit' in outputs:
+                            preds_h.append(outputs['p_hit'].cpu())
+                        if 'p_kill' in outputs:
+                            preds_k.append(outputs['p_kill'].cpu())
+                    elif hasattr(outputs, 'p_hit'):
                         preds_h.append(outputs.p_hit.cpu())
-                    if hasattr(outputs, 'p_kill'):
-                        preds_k.append(outputs.p_kill.cpu())
+                        if hasattr(outputs, 'p_kill'):
+                            preds_k.append(outputs.p_kill.cpu())
                 
                 # Collect targets
-                if 'labels' in batch:
-                    if 'hit' in batch['labels']:
-                        tgts_h.append(batch['labels']['hit'].cpu())
-                    if 'kill' in batch['labels']:
-                        tgts_k.append(batch['labels']['kill'].cpu())
+                if fusion_batch.get('labels') is not None:
+                    labels = fusion_batch['labels']
+                    if isinstance(labels, dict):
+                        if 'hit' in labels:
+                            tgts_h.append(labels['hit'].cpu())
+                        if 'kill' in labels:
+                            tgts_k.append(labels['kill'].cpu())
+                    else:
+                        # Handle tensor labels 
+                        if labels.dim() == 2 and labels.shape[1] >= 2:
+                            tgts_h.append(labels[:, 0].cpu())
+                            tgts_k.append(labels[:, 1].cpu())
+                        else:
+                            tgts_h.append(labels.cpu())
         
         # Compute validation metrics
         if preds_h and tgts_h:

@@ -480,6 +480,13 @@ class MemoryEfficientTrainer(Trainer):
                 else:
                     micro_batch[key] = value
             
+            # Move micro_batch to correct device (important for DeepSpeed compatibility)
+            if not self.use_accelerate:  # Accelerate handles device placement automatically
+                device = self.device if not self.use_deepspeed else next(model.parameters()).device
+                for key, value in micro_batch.items():
+                    if isinstance(value, torch.Tensor):
+                        micro_batch[key] = value.to(device)
+            
             # Forward pass - let DeepSpeed handle mixed precision if enabled
             if self.use_deepspeed:
                 # DeepSpeed handles mixed precision internally
