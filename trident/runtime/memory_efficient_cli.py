@@ -89,6 +89,24 @@ def command_train_memory_efficient(args) -> None:
             args.device_map = "balanced"
         print(f"   ✅ CPU-compatible configuration applied")
     
+    # Resolve configuration conflicts for CUDA systems
+    elif torch.cuda.is_available():
+        conflicts_resolved = []
+        if args.zero_stage > 0 and args.optimizer in ["adamw8bit", "paged_adamw8bit"]:
+            print(f"🔧 Resolving conflict: DeepSpeed ZeRO + 8-bit optimizer")
+            print(f"   • DeepSpeed will handle optimizer → disabling 8-bit optimizer")
+            args.optimizer = "adamw"
+            conflicts_resolved.append("8-bit optimizer → DeepSpeed optimizer")
+            
+        if args.zero_stage > 0 and args.device_map == "auto":
+            print(f"🔧 Resolving conflict: DeepSpeed ZeRO + Accelerate device mapping")
+            print(f"   • Prioritizing DeepSpeed → disabling Accelerate device mapping")
+            args.device_map = "balanced"
+            conflicts_resolved.append("Accelerate device map → DeepSpeed handling")
+            
+        if conflicts_resolved:
+            print(f"   ✅ Resolved {len(conflicts_resolved)} configuration conflicts")
+    
     # Validate DeepSpeed config file if specified
     if hasattr(args, 'deepspeed_config') and args.deepspeed_config and args.deepspeed_config != 'ds_config.json':
         from pathlib import Path
@@ -128,9 +146,11 @@ def command_train_memory_efficient(args) -> None:
     # Move branch models to device for preprocessing (but don't train them)
     for name, model in models.items():
         if name != 'f2':  # Don't move f2 yet, it will be handled by trainer
-            if not trainer.use_accelerate:
-                model = model.to(device)
+            # Always move branch models to device, regardless of Accelerate usage
+            # since they're used for preprocessing and aren't managed by Accelerate
+            model = model.to(device)
             model.eval()  # Set to eval mode since we're not training these
+            models[name] = model  # Update the model in the dict
     
     # Prepare fusion model for training
     f2, optimizer = trainer.prepare_model_for_training(f2, "fusion_f2")
@@ -144,16 +164,6 @@ def command_train_memory_efficient(args) -> None:
     print(f"  Device map: {args.device_map}")
     print(f"  Max GPU memory: {args.max_gpu_mem}")
     print(f"  QLoRA: {args.qlora}")
-    
-    # Validate configuration
-    if args.zero_stage > 0 and args.optimizer in ["adamw8bit", "paged_adamw8bit"]:
-        print(f"⚠️  WARNING: DeepSpeed ZeRO stage {args.zero_stage} will override 8-bit optimizer settings.")
-        print(f"   DeepSpeed will use its own AdamW optimizer for CPU offload instead of {args.optimizer}.")
-    
-    if args.zero_stage > 0 and args.device_map == "auto":
-        print(f"⚠️  WARNING: Using both DeepSpeed ZeRO and Accelerate device mapping is not recommended.")
-        print(f"   Consider using either --zero-stage 0 or --device-map balanced.")
-    
     
     # Training parameters
     epochs = cfg.get('training', {}).get('epochs', {}).get('train_fusion', 3)
@@ -171,15 +181,38 @@ def command_train_memory_efficient(args) -> None:
             kin = batch['kin'].to(device)  # [B,3,9]
             class_ids = batch.get('class_id', torch.zeros(rgb.shape[0], dtype=torch.long)).to(device)
             
-            # Process through branch models (no gradients needed)
-            i1_out = models['i1'](rgb)
-            t1_out = models['t1'](ir)
-            r1_feats, _ = models['r1'](kin)
+            # Ensure all branch models are on the correct device
+            for name, model in models.items():
+                if name != 'f2':
+                    model_device = next(model.parameters()).device
+                    if model_device != device:
+                        print(f"⚠️  Moving {name} from {model_device} to {device}")
+                        models[name] = model.to(device)
             
-            # Kinematics augmentation (from _kin_aug function)
-            k_aug, k_tokens = _kin_aug(kin, r1_feats)
-            zr2, _ = models['r2'](k_aug)
-            zr3, _ = models['r3'](k_tokens)
+            # Process through branch models (no gradients needed)
+            try:
+                i1_out = models['i1'](rgb)
+                t1_out = models['t1'](ir)
+                r1_feats, _ = models['r1'](kin)
+                
+                # Kinematics augmentation (from _kin_aug function)
+                k_aug, k_tokens = _kin_aug(kin, r1_feats)
+                zr2, _ = models['r2'](k_aug)
+                zr3, _ = models['r3'](k_tokens)
+                
+            except Exception as e:
+                print(f"❌ Error in branch model processing: {e}")
+                print(f"   RGB shape: {rgb.shape}, device: {rgb.device}")
+                print(f"   IR shape: {ir.shape}, device: {ir.device}")
+                print(f"   KIN shape: {kin.shape}, device: {kin.device}")
+                for name, model in models.items():
+                    if name != 'f2':
+                        try:
+                            model_device = next(model.parameters()).device
+                            print(f"   {name} device: {model_device}")
+                        except:
+                            print(f"   {name} device: unknown")
+                raise
             
             # Concat features per architecture specification
             zi = torch.cat([i1_out['zi'], torch.zeros(rgb.shape[0], 256, device=device)], dim=1)  # 768
