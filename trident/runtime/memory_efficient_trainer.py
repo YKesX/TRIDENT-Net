@@ -465,7 +465,26 @@ class MemoryEfficientTrainer(Trainer):
             
             # Forward pass with mixed precision
             with autocast(device_type="cuda", dtype=self.mixed_precision_dtype, enabled=self.use_bf16):
-                outputs = model(**micro_batch)
+                try:
+                    outputs = model(**micro_batch)
+                except TypeError as e:
+                    # Handle model signature mismatch
+                    self.logger.error(f"Model forward call failed with micro_batch keys: {list(micro_batch.keys())}")
+                    self.logger.error(f"Model signature error: {e}")
+                    
+                    # Try alternative calling patterns
+                    if len(micro_batch) == 1:
+                        # Single input case
+                        key = list(micro_batch.keys())[0]
+                        outputs = model(micro_batch[key])
+                    else:
+                        # Multiple inputs - try positional args
+                        outputs = model(*micro_batch.values())
+                except Exception as e:
+                    self.logger.error(f"Unexpected error in model forward: {e}")
+                    self.logger.error(f"Micro batch keys: {list(micro_batch.keys())}")
+                    self.logger.error(f"Micro batch shapes: {[(k, v.shape if isinstance(v, torch.Tensor) else type(v)) for k, v in micro_batch.items()]}")
+                    raise
                 
                 # Calculate loss (this would depend on your specific loss function)
                 if isinstance(outputs, dict) and 'loss' in outputs:
