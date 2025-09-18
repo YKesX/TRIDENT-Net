@@ -376,7 +376,7 @@ def stop_process():
 def start_training(
     mode: str, train_dir: str, eval_dir: str, config_path: str, pipeline: str,
     training_engine: str, use_synth: bool, batch_size: int, num_workers: int, pin_memory: bool,
-    ckpt_policy: str, ckpt_steps: int, drive_dir: str, use_drive_api: bool,
+    grad_accum_steps: int, ckpt_policy: str, ckpt_steps: int, drive_dir: str, use_drive_api: bool,
     drive_folder_id: str, device_choice: str
 ) -> str:
     """Start the training/evaluation process."""
@@ -400,9 +400,9 @@ def start_training(
             cmd = [
                 py, "-m", cli_module,
                 "--config", config_path,
-                "--use-bf16",  # Enable BF16 by default
+                "--use-fp16",  # Enable FP16 by default
                 "--checkpoint-every-layer",  # Enable checkpointing
-                "--grad-accum-steps", "8",  # Default gradient accumulation
+                "--grad-accum-steps", str(int(grad_accum_steps)),  # Configurable gradient accumulation
                 "--optimizer", "adamw8bit",  # Use 8-bit optimizer
                 "--zero-stage", "2",  # DeepSpeed ZeRO-2 by default
             ]
@@ -572,11 +572,11 @@ def create_interface():
                         <h4 style="margin: 0 0 10px 0; color: #1976d2;">🧠 Memory-Efficient Training Active</h4>
                         <p style="margin: 5px 0; color: #424242;">This mode enables several optimizations for GPU memory constraints:</p>
                         <ul style="margin: 5px 0; color: #424242;">
-                            <li><strong>BF16 Mixed Precision:</strong> ~50% memory reduction</li>
+                            <li><strong>FP16 Mixed Precision:</strong> ~50% memory reduction</li>
                             <li><strong>Activation Checkpointing:</strong> Trade computation for memory</li>
                             <li><strong>8-bit Optimizers:</strong> AdamW8bit for reduced optimizer states</li>
                             <li><strong>DeepSpeed ZeRO-2:</strong> CPU optimizer offload</li>
-                            <li><strong>Gradient Accumulation:</strong> Micro-batching (8 steps default)</li>
+                            <li><strong>Gradient Accumulation:</strong> Micro-batching (4 steps default)</li>
                         </ul>
                         <p style="margin: 5px 0; color: #424242;"><em>Ideal for training on single GPU with &lt;39GB VRAM (e.g., A100-40GB).</em></p>
                     </div>
@@ -600,6 +600,15 @@ def create_interface():
             batch_size = gr.Number(value=2, minimum=1, label="Batch size", precision=0)
             num_workers = gr.Number(value=0, minimum=0, label="Workers", precision=0)
             pin_memory = gr.Checkbox(value=False, label="Pin memory")
+        
+        # Memory-efficient training settings  
+        gr.HTML('<div class="apple-title">Memory-Efficient Settings</div>')
+        with gr.Row():
+            grad_accum_steps = gr.Number(
+                value=4, minimum=1, maximum=16, step=1,
+                label="Gradient accumulation steps", precision=0,
+                info="Number of gradient accumulation steps (lower = less memory, more frequent updates)"
+            )
         
         # Checkpointing
         gr.HTML('<div class="apple-title">Checkpointing</div>')
@@ -725,7 +734,7 @@ def create_interface():
             inputs=[
                 mode, train_dir, eval_dir, config_path, pipeline,
                 training_engine, use_synth, batch_size, num_workers, pin_memory,
-                ckpt_policy, ckpt_steps, drive_dir, use_drive_api,
+                grad_accum_steps, ckpt_policy, ckpt_steps, drive_dir, use_drive_api,
                 drive_folder_id, device_choice
             ],
             outputs=[start_result]

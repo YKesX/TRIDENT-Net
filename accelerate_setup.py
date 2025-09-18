@@ -16,7 +16,7 @@ def setup_accelerate_model(
     checkpoint_path: Optional[Union[str, Path]] = None,
     device_map: str = "auto", 
     max_gpu_memory: str = "39GiB",
-    max_cpu_memory: str = "70GiB",
+    max_cpu_memory: str = "30GiB",
     offload_folder: str = "./offload",
     dtype: torch.dtype = torch.bfloat16
 ) -> torch.nn.Module:

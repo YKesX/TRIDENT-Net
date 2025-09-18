@@ -223,8 +223,8 @@ def add_memory_efficient_args(parser: argparse.ArgumentParser) -> None:
                           help='Disable activation checkpointing')
     
     # Gradient accumulation
-    mem_group.add_argument('--grad-accum-steps', type=int, default=8,
-                          help='Gradient accumulation steps for micro-batching (default: 8)')
+    mem_group.add_argument('--grad-accum-steps', type=int, default=4,
+                          help='Gradient accumulation steps for micro-batching (default: 4)')
     
     # Optimizer options
     mem_group.add_argument('--optimizer', choices=['adamw', 'adamw8bit', 'paged_adamw8bit'], 
@@ -244,8 +244,8 @@ def add_memory_efficient_args(parser: argparse.ArgumentParser) -> None:
                           help='Device mapping strategy (default: auto)')
     acc_group.add_argument('--max-gpu-mem', type=str, default='39GiB',
                           help='Maximum GPU memory allocation (default: 39GiB)')
-    acc_group.add_argument('--cpu-mem', type=str, default='70GiB',
-                          help='Maximum CPU memory for offload (default: 70GiB)')
+    acc_group.add_argument('--cpu-mem', type=str, default='30GiB',
+                          help='Maximum CPU memory for offload (default: 30GiB)')
     
     # QLoRA options
     qlora_group = parser.add_argument_group('QLoRA')

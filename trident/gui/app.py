@@ -455,7 +455,7 @@ def main():
                     cmd = [
                         py, "-m", cli_module,
                         "--config", config_path,
-                        "--use-bf16",  # Enable BF16 by default
+                        "--use-fp16",  # Enable FP16 by default
                         "--checkpoint-every-layer",  # Enable checkpointing
                         "--grad-accum-steps", "8",  # Default gradient accumulation
                         "--optimizer", "adamw8bit",  # Use 8-bit optimizer
