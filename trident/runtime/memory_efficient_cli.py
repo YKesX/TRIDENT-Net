@@ -67,6 +67,9 @@ def command_train_memory_efficient(args) -> None:
         train_loader, val_loader = create_data_loaders(cfg)
     
     device = _device()
+    # Ensure device is normalized for consistency
+    if device.type == 'cuda' and device.index is None:
+        device = torch.device('cuda:0')  # Normalize to cuda:0 for consistency
     print(f"device={device} cuda_available={torch.cuda.is_available()} "
           f"cuda_devices={torch.cuda.device_count()} "
           f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}")
@@ -182,10 +185,24 @@ def command_train_memory_efficient(args) -> None:
             class_ids = batch.get('class_id', torch.zeros(rgb.shape[0], dtype=torch.long)).to(device)
             
             # Ensure all branch models are on the correct device
+            def devices_match(device1, device2):
+                """Check if two devices are the same, handling cuda/cuda:0 equivalence."""
+                # Convert both to torch.device objects for proper comparison
+                dev1 = torch.device(device1)
+                dev2 = torch.device(device2)
+                
+                # Handle cuda equivalence (cuda == cuda:0)
+                if dev1.type == 'cuda' and dev2.type == 'cuda':
+                    dev1_index = 0 if dev1.index is None else dev1.index
+                    dev2_index = 0 if dev2.index is None else dev2.index
+                    return dev1_index == dev2_index
+                
+                return dev1 == dev2
+            
             for name, model in models.items():
                 if name != 'f2':
                     model_device = next(model.parameters()).device
-                    if model_device != device:
+                    if not devices_match(model_device, device):
                         print(f"⚠️  Moving {name} from {model_device} to {device}")
                         models[name] = model.to(device)
             
