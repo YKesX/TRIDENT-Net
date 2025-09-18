@@ -570,15 +570,16 @@ def create_interface():
                     value="""
                     <div style="background: #e3f2fd; padding: 15px; border-radius: 8px; margin: 10px 0; border-left: 4px solid #2196f3;">
                         <h4 style="margin: 0 0 10px 0; color: #1976d2;">🧠 Memory-Efficient Training Active</h4>
-                        <p style="margin: 5px 0; color: #424242;">This mode enables several optimizations for GPU memory constraints:</p>
+                        <p style="margin: 5px 0; color: #424242;">This mode supports both GPU training and CPU evaluation systems:</p>
                         <ul style="margin: 5px 0; color: #424242;">
-                            <li><strong>FP16 Mixed Precision:</strong> ~50% memory reduction</li>
+                            <li><strong>FP16 Mixed Precision:</strong> ~50% memory reduction (auto-disabled on CPU)</li>
                             <li><strong>Activation Checkpointing:</strong> Trade computation for memory</li>
-                            <li><strong>8-bit Optimizers:</strong> AdamW8bit for reduced optimizer states</li>
-                            <li><strong>DeepSpeed ZeRO-2:</strong> CPU optimizer offload</li>
+                            <li><strong>8-bit Optimizers:</strong> AdamW8bit for reduced optimizer states (auto-disabled on CPU)</li>
+                            <li><strong>DeepSpeed ZeRO-2:</strong> CPU optimizer offload (auto-disabled on CPU)</li>
                             <li><strong>Gradient Accumulation:</strong> Micro-batching (4 steps default)</li>
+                            <li><strong>CPU Compatibility:</strong> Automatic fallback for CPU-only systems</li>
                         </ul>
-                        <p style="margin: 5px 0; color: #424242;"><em>Ideal for training on single GPU with &lt;39GB VRAM (e.g., A100-40GB).</em></p>
+                        <p style="margin: 5px 0; color: #424242;"><em>Training: A100 39GB + 70GB RAM | Evaluation: CPU-only + 30GB RAM</em></p>
                     </div>
                     """,
                     visible=True

@@ -94,7 +94,7 @@ class MemoryEfficientTrainer(Trainer):
         deepspeed_config: Optional[Dict] = None,
         use_accelerate: bool = False,
         max_gpu_memory: str = "39GiB",
-        max_cpu_memory: str = "30GiB",
+        max_cpu_memory: str = "70GiB",
         offload_folder: Optional[str] = None,
         use_qlora: bool = False,
         **kwargs
@@ -128,19 +128,31 @@ class MemoryEfficientTrainer(Trainer):
             **kwargs
         )
         
-        self.use_fp16 = use_fp16 and (torch.cuda.is_available() or torch.backends.mps.is_available())
+        # FP16 settings - disable on CPU-only systems
+        if use_fp16 and self.device.type != "cuda":
+            self.logger.warning("FP16 disabled: only supported on CUDA devices, using FP32")
+            self.use_fp16 = False
+        else:
+            self.use_fp16 = use_fp16 and (torch.cuda.is_available() or torch.backends.mps.is_available())
+        
         self.mixed_precision_dtype = mixed_precision_dtype if self.use_fp16 else torch.float32
         self.use_checkpointing = use_checkpointing
         self.checkpoint_modules = checkpoint_modules or [
             "transformer", "cross_attn", "VideoFrag3D", "TinyTempoFormer", 
             "CrossAttnFusion", "PlumeDetXL"
         ]
-        self.use_8bit_optimizer = use_8bit_optimizer and HAS_BITSANDBYTES
+        
+        # 8-bit optimizer settings - disable on CPU-only systems
+        self.use_8bit_optimizer = use_8bit_optimizer and HAS_BITSANDBYTES and torch.cuda.is_available()
+        if use_8bit_optimizer and not self.use_8bit_optimizer:
+            self.logger.warning("8-bit optimizer disabled: requires CUDA, falling back to standard optimizer")
         self.optimizer_type = optimizer_type
         self.grad_accum_steps = max(1, grad_accum_steps)
         
-        # DeepSpeed settings
-        self.use_deepspeed = use_deepspeed and HAS_DEEPSPEED
+        # DeepSpeed settings - disable on CPU-only systems
+        self.use_deepspeed = use_deepspeed and HAS_DEEPSPEED and torch.cuda.is_available()
+        if use_deepspeed and not self.use_deepspeed:
+            self.logger.warning("DeepSpeed disabled: requires CUDA")
         self.deepspeed_config = deepspeed_config
         
         # Accelerate settings
@@ -149,8 +161,10 @@ class MemoryEfficientTrainer(Trainer):
         self.max_cpu_memory = max_cpu_memory
         self.offload_folder = offload_folder
         
-        # QLoRA settings
-        self.use_qlora = use_qlora and HAS_BITSANDBYTES
+        # QLoRA settings - disable on CPU-only systems  
+        self.use_qlora = use_qlora and HAS_BITSANDBYTES and torch.cuda.is_available()
+        if use_qlora and not self.use_qlora:
+            self.logger.warning("QLoRA disabled: requires CUDA")
         
         # Setup memory-efficient scaler for FP16/FP32
         if self.use_fp16:

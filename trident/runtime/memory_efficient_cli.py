@@ -112,6 +112,24 @@ def command_train_memory_efficient(args) -> None:
         print(f"⚠️  WARNING: Using both DeepSpeed ZeRO and Accelerate device mapping is not recommended.")
         print(f"   Consider using either --zero-stage 0 or --device-map balanced.")
     
+    # CPU compatibility checks and auto-adjustments
+    is_cpu_only = not torch.cuda.is_available() or os.environ.get('CUDA_VISIBLE_DEVICES') == '-1'
+    if is_cpu_only:
+        print(f"🖥️  CPU-only mode detected. Adjusting settings for compatibility:")
+        if args.use_fp16:
+            print(f"   • Disabling FP16 (not supported on CPU) → FP32")
+            args.use_fp16 = False
+        if args.optimizer in ["adamw8bit", "paged_adamw8bit"]:
+            print(f"   • Disabling 8-bit optimizer (requires CUDA) → adamw")
+            args.optimizer = "adamw"
+        if args.zero_stage > 0:
+            print(f"   • Disabling DeepSpeed ZeRO (requires CUDA) → stage 0")
+            args.zero_stage = 0
+        if args.device_map == "auto":
+            print(f"   • Disabling Accelerate device mapping (not needed on CPU)")
+            args.device_map = "balanced"
+        print(f"   ✅ CPU-compatible configuration applied")
+    
     
     # Training parameters
     epochs = cfg.get('training', {}).get('epochs', {}).get('train_fusion', 3)
@@ -254,8 +272,8 @@ def add_memory_efficient_args(parser: argparse.ArgumentParser) -> None:
                           help='Device mapping strategy (default: auto)')
     acc_group.add_argument('--max-gpu-mem', type=str, default='39GiB',
                           help='Maximum GPU memory allocation (default: 39GiB)')
-    acc_group.add_argument('--cpu-mem', type=str, default='30GiB',
-                          help='Maximum CPU memory for offload (default: 30GiB)')
+    acc_group.add_argument('--cpu-mem', type=str, default='70GiB',
+                          help='Maximum CPU memory for offload (default: 70GiB for training, 30GiB for evaluation)')
     
     # QLoRA options
     qlora_group = parser.add_argument_group('QLoRA')

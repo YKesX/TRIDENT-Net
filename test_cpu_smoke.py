@@ -172,7 +172,7 @@ def test_cli_args_parsing():
     # Test various argument combinations
     test_args = [
         ["--use-fp16", "--grad-accum-steps", "4"],
-        ["--no-bf16", "--optimizer", "adamw", "--zero-stage", "0"],
+        ["--no-fp16", "--optimizer", "adamw", "--zero-stage", "0"],
         ["--checkpoint-every-layer", "--device-map", "auto", "--max-gpu-mem", "39GiB"],
         ["--qlora", "--optimizer", "paged_adamw8bit"]
     ]

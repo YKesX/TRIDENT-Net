@@ -303,14 +303,15 @@ def main():
         st.info("""
         🧠 **Memory-Efficient Training Active**
         
-        This mode enables several optimizations for GPU memory constraints:
-        • **FP16 Mixed Precision**: ~50% memory reduction
+        This mode supports both GPU training and CPU evaluation systems:
+        • **FP16 Mixed Precision**: ~50% memory reduction (auto-disabled on CPU)
         • **Activation Checkpointing**: Trade computation for memory
-        • **8-bit Optimizers**: AdamW8bit for reduced optimizer states
-        • **DeepSpeed ZeRO-2**: CPU optimizer offload
-        • **Gradient Accumulation**: Micro-batching (8 steps default)
+        • **8-bit Optimizers**: AdamW8bit for reduced optimizer states (auto-disabled on CPU)
+        • **DeepSpeed ZeRO-2**: CPU optimizer offload (auto-disabled on CPU)
+        • **Gradient Accumulation**: Micro-batching (4 steps default)
+        • **CPU Compatibility**: Automatic fallback for CPU-only systems
         
-        Ideal for training on single GPU with <39GB VRAM (e.g., A100-40GB).
+        Training: A100 39GB + 70GB RAM | Evaluation: CPU-only + 30GB RAM
         """)
 
     st.markdown("---")
