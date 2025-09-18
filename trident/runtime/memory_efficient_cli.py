@@ -228,7 +228,24 @@ def command_train_memory_efficient(args) -> None:
                 averaged_output[key] = stacked.mean(dim=0)
             return averaged_output
         else:
-            return chunk_outputs[0] if chunk_outputs else model(video_tensor[:, :, :3])  # Fallback
+            # Emergency fallback: use specific temporal frames at 1300ms, 2000ms, 6000ms
+            B, C, T, H, W = video_tensor.shape
+            total_duration_ms = 8000  # All videos are 8000ms
+            
+            # Calculate frame indices for specific timestamps
+            frame_1300ms = int((1300 / total_duration_ms) * T)
+            frame_2000ms = int((2000 / total_duration_ms) * T) 
+            frame_6000ms = int((6000 / total_duration_ms) * T)
+            
+            # Ensure indices are within bounds
+            frame_1300ms = min(frame_1300ms, T-1)
+            frame_2000ms = min(frame_2000ms, T-1)
+            frame_6000ms = min(frame_6000ms, T-1)
+            
+            selected_frames = [frame_1300ms, frame_2000ms, frame_6000ms]
+            emergency_tensor = video_tensor[:, :, selected_frames]
+            
+            return model(emergency_tensor)
 
     # Preprocessing function to convert raw batch to fusion input format
     def preprocess_batch_for_fusion(batch, models, device):
@@ -296,21 +313,42 @@ def command_train_memory_efficient(args) -> None:
                 
             except torch.cuda.OutOfMemoryError as oom_error:
                 print(f"❌ CUDA OOM Error: {oom_error}")
-                print(f"🔧 Attempting emergency fallback: using first 3 frames only")
+                print(f"🔧 Attempting emergency fallback: using temporal samples at 1300ms, 2000ms, 6000ms")
                 if device.type == 'cuda':
                     torch.cuda.empty_cache()
                 
                 try:
-                    # Emergency fallback: use only first 3 frames
-                    i1_out = models['i1'](rgb[:, :, :3])
-                    t1_out = models['t1'](ir[:, :, :3])
+                    # Emergency fallback: use specific temporal frames
+                    # Video is 8000ms total, so calculate frame indices for 1300ms, 2000ms, 6000ms
+                    B, C, T, H, W = rgb.shape
+                    total_duration_ms = 8000  # All videos are 8000ms
+                    
+                    # Calculate frame indices for specific timestamps
+                    frame_1300ms = int((1300 / total_duration_ms) * T)
+                    frame_2000ms = int((2000 / total_duration_ms) * T) 
+                    frame_6000ms = int((6000 / total_duration_ms) * T)
+                    
+                    # Ensure indices are within bounds
+                    frame_1300ms = min(frame_1300ms, T-1)
+                    frame_2000ms = min(frame_2000ms, T-1)
+                    frame_6000ms = min(frame_6000ms, T-1)
+                    
+                    selected_frames = [frame_1300ms, frame_2000ms, frame_6000ms]
+                    print(f"   Using frames at indices {selected_frames} (timestamps: 1300ms, 2000ms, 6000ms)")
+                    
+                    # Extract specific frames
+                    rgb_emergency = rgb[:, :, selected_frames]  # Shape: [B, C, 3, H, W]
+                    ir_emergency = ir[:, :, selected_frames]    # Shape: [B, C, 3, H, W]
+                    
+                    i1_out = models['i1'](rgb_emergency)
+                    t1_out = models['t1'](ir_emergency)
                     r1_feats, _ = models['r1'](kin)
                     
                     k_aug, k_tokens = _kin_aug(kin, r1_feats)
                     zr2, _ = models['r2'](k_aug)
                     zr3, _ = models['r3'](k_tokens)
                     
-                    print("✅ Emergency fallback successful")
+                    print("✅ Emergency temporal sampling successful")
                 except Exception as emergency_error:
                     print(f"❌ Emergency fallback also failed: {emergency_error}")
                     raise
