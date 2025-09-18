@@ -337,7 +337,16 @@ def main():
                 min_value=1, max_value=16, value=4, step=1,
                 help="Number of gradient accumulation steps (lower = less memory, more frequent updates)"
             )
-        # Leave mc2 empty for future memory settings
+        with mc2:
+            deepspeed_config = st.selectbox(
+                "DeepSpeed Configuration",
+                ["Auto (based on device)", 
+                 "configs/a100_39gb_70gb_ram_training.json",
+                 "configs/cpu_only_30gb_ram.json", 
+                 "configs/a100_39gb_30gb_cpu.json"],
+                index=0,
+                help="Select hardware-specific configuration or let system auto-detect"
+            )
 
     # Checkpointing
     with st.container():
@@ -464,6 +473,16 @@ def main():
             
             if mode == "train" or mode == "finaltrain":
                 if training_engine == "Memory-Efficient":
+                    # Determine DeepSpeed config based on selection
+                    if deepspeed_config == "Auto (based on device)":
+                        # Auto-select based on device choice
+                        if device_choice == "CPU":
+                            selected_config = "configs/cpu_only_30gb_ram.json"
+                        else:
+                            selected_config = "configs/a100_39gb_70gb_ram_training.json"
+                    else:
+                        selected_config = deepspeed_config
+                    
                     # Use memory-efficient CLI
                     cmd = [
                         py, "-m", cli_module,
@@ -473,6 +492,7 @@ def main():
                         "--grad-accum-steps", str(int(grad_accum_steps)),  # Configurable gradient accumulation
                         "--optimizer", "adamw8bit",  # Use 8-bit optimizer
                         "--zero-stage", "2",  # DeepSpeed ZeRO-2 by default
+                        "--deepspeed-config", selected_config,  # Use selected config
                     ]
                 else:
                     # Use standard CLI

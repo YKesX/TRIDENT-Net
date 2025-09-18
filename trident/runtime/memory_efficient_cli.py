@@ -69,7 +69,37 @@ def command_train_memory_efficient(args) -> None:
           f"cuda_devices={torch.cuda.device_count()} "
           f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}")
     
-    # Create memory-efficient trainer
+    # CPU compatibility checks and auto-adjustments
+    is_cpu_only = not torch.cuda.is_available() or os.environ.get('CUDA_VISIBLE_DEVICES') == '-1'
+    if is_cpu_only:
+        print(f"🖥️  CPU-only mode detected. Adjusting settings for compatibility:")
+        if args.use_fp16:
+            print(f"   • Disabling FP16 (not supported on CPU) → FP32")
+            args.use_fp16 = False
+        if args.optimizer in ["adamw8bit", "paged_adamw8bit"]:
+            print(f"   • Disabling 8-bit optimizer (requires CUDA) → adamw")
+            args.optimizer = "adamw"
+        if args.zero_stage > 0:
+            print(f"   • Disabling DeepSpeed ZeRO (requires CUDA) → stage 0")
+            args.zero_stage = 0
+        if args.device_map == "auto":
+            print(f"   • Disabling Accelerate device mapping (not needed on CPU)")
+            args.device_map = "balanced"
+        print(f"   ✅ CPU-compatible configuration applied")
+    
+    # Validate DeepSpeed config file if specified
+    if hasattr(args, 'deepspeed_config') and args.deepspeed_config and args.deepspeed_config != 'ds_config.json':
+        from pathlib import Path
+        config_path = Path(args.deepspeed_config)
+        if not config_path.exists():
+            print(f"⚠️  WARNING: DeepSpeed config file not found: {args.deepspeed_config}")
+            print(f"   Falling back to automatic configuration generation")
+            args.deepspeed_config = None
+        elif is_cpu_only and 'cpu_only' not in str(config_path):
+            print(f"⚠️  WARNING: Using GPU-optimized config on CPU system: {args.deepspeed_config}")
+            print(f"   Consider using configs/cpu_only_30gb_ram.json for CPU-only systems")
+    
+    # Create memory-efficient trainer AFTER CPU compatibility adjustments
     trainer = MemoryEfficientTrainer(
         config_loader=config_loader,
         device=device,
@@ -111,24 +141,6 @@ def command_train_memory_efficient(args) -> None:
     if args.zero_stage > 0 and args.device_map == "auto":
         print(f"⚠️  WARNING: Using both DeepSpeed ZeRO and Accelerate device mapping is not recommended.")
         print(f"   Consider using either --zero-stage 0 or --device-map balanced.")
-    
-    # CPU compatibility checks and auto-adjustments
-    is_cpu_only = not torch.cuda.is_available() or os.environ.get('CUDA_VISIBLE_DEVICES') == '-1'
-    if is_cpu_only:
-        print(f"🖥️  CPU-only mode detected. Adjusting settings for compatibility:")
-        if args.use_fp16:
-            print(f"   • Disabling FP16 (not supported on CPU) → FP32")
-            args.use_fp16 = False
-        if args.optimizer in ["adamw8bit", "paged_adamw8bit"]:
-            print(f"   • Disabling 8-bit optimizer (requires CUDA) → adamw")
-            args.optimizer = "adamw"
-        if args.zero_stage > 0:
-            print(f"   • Disabling DeepSpeed ZeRO (requires CUDA) → stage 0")
-            args.zero_stage = 0
-        if args.device_map == "auto":
-            print(f"   • Disabling Accelerate device mapping (not needed on CPU)")
-            args.device_map = "balanced"
-        print(f"   ✅ CPU-compatible configuration applied")
     
     
     # Training parameters

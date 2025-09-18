@@ -376,7 +376,7 @@ def stop_process():
 def start_training(
     mode: str, train_dir: str, eval_dir: str, config_path: str, pipeline: str,
     training_engine: str, use_synth: bool, batch_size: int, num_workers: int, pin_memory: bool,
-    grad_accum_steps: int, ckpt_policy: str, ckpt_steps: int, drive_dir: str, use_drive_api: bool,
+    grad_accum_steps: int, deepspeed_config: str, ckpt_policy: str, ckpt_steps: int, drive_dir: str, use_drive_api: bool,
     drive_folder_id: str, device_choice: str
 ) -> str:
     """Start the training/evaluation process."""
@@ -396,6 +396,16 @@ def start_training(
     
     if mode == "train" or mode == "finaltrain":
         if training_engine == "Memory-Efficient":
+            # Determine DeepSpeed config based on selection
+            if deepspeed_config == "Auto (based on device)":
+                # Auto-select based on device choice
+                if device_choice == "CPU":
+                    selected_config = "configs/cpu_only_30gb_ram.json"
+                else:
+                    selected_config = "configs/a100_39gb_70gb_ram_training.json"
+            else:
+                selected_config = deepspeed_config
+            
             # Use memory-efficient CLI
             cmd = [
                 py, "-m", cli_module,
@@ -405,6 +415,7 @@ def start_training(
                 "--grad-accum-steps", str(int(grad_accum_steps)),  # Configurable gradient accumulation
                 "--optimizer", "adamw8bit",  # Use 8-bit optimizer
                 "--zero-stage", "2",  # DeepSpeed ZeRO-2 by default
+                "--deepspeed-config", selected_config,  # Use selected config
             ]
         else:
             # Use standard CLI
@@ -611,6 +622,19 @@ def create_interface():
                 info="Number of gradient accumulation steps (lower = less memory, more frequent updates)"
             )
         
+        with gr.Row():
+            deepspeed_config = gr.Dropdown(
+                choices=[
+                    "Auto (based on device)",
+                    "configs/a100_39gb_70gb_ram_training.json",
+                    "configs/cpu_only_30gb_ram.json", 
+                    "configs/a100_39gb_30gb_cpu.json"
+                ],
+                value="Auto (based on device)",
+                label="DeepSpeed Configuration",
+                info="Select hardware-specific configuration or let system auto-detect"
+            )
+        
         # Checkpointing
         gr.HTML('<div class="apple-title">Checkpointing</div>')
         with gr.Row():
@@ -735,7 +759,7 @@ def create_interface():
             inputs=[
                 mode, train_dir, eval_dir, config_path, pipeline,
                 training_engine, use_synth, batch_size, num_workers, pin_memory,
-                grad_accum_steps, ckpt_policy, ckpt_steps, drive_dir, use_drive_api,
+                grad_accum_steps, deepspeed_config, ckpt_policy, ckpt_steps, drive_dir, use_drive_api,
                 drive_folder_id, device_choice
             ],
             outputs=[start_result]
