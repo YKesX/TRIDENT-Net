@@ -63,6 +63,8 @@ Eval/
 *.hdf5
 *.csv
 *.json
+# Exception: allow config files
+!configs/*.json
 
 
 # Logs
