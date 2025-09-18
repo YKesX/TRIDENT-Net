@@ -329,7 +329,7 @@ class MemoryEfficientTrainer(Trainer):
             "micro_batch_per_gpu": micro_batch_per_gpu,
             "gradient_accumulation_steps": self.grad_accum_steps,
             "optimizer": {
-                "type": "AdamW",
+                "type": "DeepSpeedCPUAdam",
                 "params": {
                     "lr": 2e-4,
                     "betas": [0.9, 0.999],
@@ -405,8 +405,11 @@ class MemoryEfficientTrainer(Trainer):
         # 3. Apply QLoRA if enabled
         model = self._apply_qlora(model)
         
-        # 4. Setup optimizer (before DeepSpeed)
-        optimizer = self._setup_8bit_optimizer(model)
+        # 4. Setup optimizer (skip if using DeepSpeed as it manages optimizer)
+        if not self.use_deepspeed:
+            optimizer = self._setup_8bit_optimizer(model)
+        else:
+            optimizer = None  # DeepSpeed will create its own optimizer
         
         # 5. Setup DeepSpeed or Accelerate
         if self.use_deepspeed:

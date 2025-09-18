@@ -103,6 +103,16 @@ def command_train_memory_efficient(args) -> None:
     print(f"  Max GPU memory: {args.max_gpu_mem}")
     print(f"  QLoRA: {args.qlora}")
     
+    # Validate configuration
+    if args.zero_stage > 0 and args.optimizer in ["adamw8bit", "paged_adamw8bit"]:
+        print(f"⚠️  WARNING: DeepSpeed ZeRO stage {args.zero_stage} will override 8-bit optimizer settings.")
+        print(f"   DeepSpeed will use DeepSpeedCPUAdam for CPU offload instead of {args.optimizer}.")
+    
+    if args.zero_stage > 0 and args.device_map == "auto":
+        print(f"⚠️  WARNING: Using both DeepSpeed ZeRO and Accelerate device mapping is not recommended.")
+        print(f"   Consider using either --zero-stage 0 or --device-map balanced.")
+    
+    
     # Training parameters
     epochs = cfg.get('training', {}).get('epochs', {}).get('train_fusion', 3)
     
