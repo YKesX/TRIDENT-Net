@@ -174,15 +174,78 @@ def command_train_memory_efficient(args) -> None:
     # Training loop
     print(f"Training for {epochs} epochs with memory optimizations...")
     
+    def reduce_batch_size_if_needed(batch, device):
+        """Reduce batch size if video sequences are too large for available memory."""
+        rgb = batch['rgb']
+        
+        # Check if video is too large (> 50 frames at high resolution)
+        B, C, T, H, W = rgb.shape
+        estimated_size_gb = (B * C * T * H * W * 4) / (1024**3)  # Rough estimate in GB
+        
+        if estimated_size_gb > 4.0:  # If > 4GB, reduce temporal dimension
+            max_frames = min(T, 16)  # Limit to 16 frames maximum
+            print(f"🔧 Reducing video from {T} to {max_frames} frames (estimated size: {estimated_size_gb:.2f}GB)")
+            
+            # Temporally subsample video
+            indices = torch.linspace(0, T-1, max_frames).long()
+            batch['rgb'] = rgb[:, :, indices]
+            batch['ir'] = batch['ir'][:, :, indices]
+            
+        return batch
+
+    def process_video_in_chunks(model, video_tensor, chunk_size=8, overlap=2):
+        """Process large video sequences in smaller temporal chunks to reduce memory usage."""
+        B, C, T, H, W = video_tensor.shape
+        
+        if T <= chunk_size:
+            # Video is small enough, process normally
+            return model(video_tensor)
+        
+        print(f"🔧 Processing large video (T={T}) in chunks of {chunk_size} frames")
+        
+        # Process in overlapping chunks and average results
+        chunk_outputs = []
+        for start_idx in range(0, T, chunk_size - overlap):
+            end_idx = min(start_idx + chunk_size, T)
+            if end_idx - start_idx < 3:  # Skip chunks that are too small
+                break
+                
+            chunk = video_tensor[:, :, start_idx:end_idx]
+            with torch.no_grad():
+                chunk_out = model(chunk)
+                chunk_outputs.append(chunk_out)
+                
+            # Clear cache after each chunk
+            if video_tensor.device.type == 'cuda':
+                torch.cuda.empty_cache()
+        
+        # Average outputs from all chunks
+        if len(chunk_outputs) > 1:
+            # Average the feature outputs
+            averaged_output = {}
+            for key in chunk_outputs[0].keys():
+                stacked = torch.stack([out[key] for out in chunk_outputs])
+                averaged_output[key] = stacked.mean(dim=0)
+            return averaged_output
+        else:
+            return chunk_outputs[0] if chunk_outputs else model(video_tensor[:, :, :3])  # Fallback
+
     # Preprocessing function to convert raw batch to fusion input format
     def preprocess_batch_for_fusion(batch, models, device):
         """Convert raw batch data to format expected by fusion model f2."""
         with torch.no_grad():
+            # Reduce batch size if needed for memory efficiency
+            batch = reduce_batch_size_if_needed(batch, device)
+            
             # Move inputs to device 
             rgb = batch['rgb'].to(device)  # [B,3,T,H,W]
             ir = batch['ir'].to(device)    # [B,1,T,H,W] 
             kin = batch['kin'].to(device)  # [B,3,9]
             class_ids = batch.get('class_id', torch.zeros(rgb.shape[0], dtype=torch.long)).to(device)
+            
+            # Clear GPU cache before processing
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
             
             # Ensure all branch models are on the correct device
             def devices_match(device1, device2):
@@ -212,10 +275,18 @@ def command_train_memory_efficient(args) -> None:
                         print(f"⚠️  Moving {name} (no parameters) to {device}")
                         models[name] = model.to(device)
             
-            # Process through branch models (no gradients needed)
+            # Process through branch models with memory optimization
             try:
-                i1_out = models['i1'](rgb)
-                t1_out = models['t1'](ir)
+                # Process video models with chunking for large sequences
+                i1_out = process_video_in_chunks(models['i1'], rgb, chunk_size=8)
+                if device.type == 'cuda':
+                    torch.cuda.empty_cache()
+                
+                t1_out = process_video_in_chunks(models['t1'], ir, chunk_size=8)
+                if device.type == 'cuda':
+                    torch.cuda.empty_cache()
+                
+                # Kinematics processing (small data, no chunking needed)
                 r1_feats, _ = models['r1'](kin)
                 
                 # Kinematics augmentation (from _kin_aug function)
@@ -223,11 +294,38 @@ def command_train_memory_efficient(args) -> None:
                 zr2, _ = models['r2'](k_aug)
                 zr3, _ = models['r3'](k_tokens)
                 
+            except torch.cuda.OutOfMemoryError as oom_error:
+                print(f"❌ CUDA OOM Error: {oom_error}")
+                print(f"🔧 Attempting emergency fallback: using first 3 frames only")
+                if device.type == 'cuda':
+                    torch.cuda.empty_cache()
+                
+                try:
+                    # Emergency fallback: use only first 3 frames
+                    i1_out = models['i1'](rgb[:, :, :3])
+                    t1_out = models['t1'](ir[:, :, :3])
+                    r1_feats, _ = models['r1'](kin)
+                    
+                    k_aug, k_tokens = _kin_aug(kin, r1_feats)
+                    zr2, _ = models['r2'](k_aug)
+                    zr3, _ = models['r3'](k_tokens)
+                    
+                    print("✅ Emergency fallback successful")
+                except Exception as emergency_error:
+                    print(f"❌ Emergency fallback also failed: {emergency_error}")
+                    raise
+                
             except Exception as e:
                 print(f"❌ Error in branch model processing: {e}")
                 print(f"   RGB shape: {rgb.shape}, device: {rgb.device}")
                 print(f"   IR shape: {ir.shape}, device: {ir.device}")
                 print(f"   KIN shape: {kin.shape}, device: {kin.device}")
+                
+                # Memory usage info
+                if device.type == 'cuda':
+                    print(f"   GPU memory: {torch.cuda.memory_allocated()/1e9:.2f}GB allocated, "
+                          f"{torch.cuda.memory_reserved()/1e9:.2f}GB reserved")
+                
                 for name, model in models.items():
                     if name != 'f2':
                         try:
