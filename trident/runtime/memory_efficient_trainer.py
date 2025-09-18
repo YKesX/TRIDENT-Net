@@ -271,10 +271,9 @@ class MemoryEfficientTrainer(Trainer):
         # Debug: Log the DeepSpeed configuration
         self.logger.info(f"DeepSpeed config being used: {ds_config}")
         
-        # Initialize DeepSpeed
+        # Initialize DeepSpeed - let DeepSpeed create its own optimizer
         model_engine, optimizer, _, _ = deepspeed.initialize(
             model=model,
-            optimizer=optimizer,
             config=ds_config
         )
         
@@ -329,6 +328,23 @@ class MemoryEfficientTrainer(Trainer):
             "train_batch_size": train_batch_size,
             "micro_batch_per_gpu": micro_batch_per_gpu,
             "gradient_accumulation_steps": self.grad_accum_steps,
+            "optimizer": {
+                "type": "AdamW",
+                "params": {
+                    "lr": 2e-4,
+                    "betas": [0.9, 0.999],
+                    "eps": 1e-8,
+                    "weight_decay": 0.01
+                }
+            },
+            "scheduler": {
+                "type": "WarmupLR",
+                "params": {
+                    "warmup_min_lr": 0,
+                    "warmup_max_lr": 2e-4,
+                    "warmup_num_steps": 100
+                }
+            },
             "bf16": {
                 "enabled": self.use_bf16
             },
@@ -344,7 +360,8 @@ class MemoryEfficientTrainer(Trainer):
                 "allgather_bucket_size": 5e8
             },
             "gradient_clipping": self.gradient_clip_norm,
-            "steps_per_print": 10
+            "steps_per_print": 10,
+            "wall_clock_breakdown": False
         }
         
         self.logger.info(f"Final DeepSpeed config: {ds_config}")
