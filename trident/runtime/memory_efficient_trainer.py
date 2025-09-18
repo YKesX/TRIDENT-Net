@@ -94,7 +94,7 @@ class MemoryEfficientTrainer(Trainer):
         deepspeed_config: Optional[Dict] = None,
         use_accelerate: bool = False,
         max_gpu_memory: str = "39GiB",
-        max_cpu_memory: str = "70GiB",
+        max_cpu_memory: str = "30GiB",
         offload_folder: Optional[str] = None,
         use_qlora: bool = False,
         **kwargs
