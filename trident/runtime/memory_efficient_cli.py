@@ -201,9 +201,15 @@ def command_train_memory_efficient(args) -> None:
             
             for name, model in models.items():
                 if name != 'f2':
-                    model_device = next(model.parameters()).device
-                    if not devices_match(model_device, device):
-                        print(f"⚠️  Moving {name} from {model_device} to {device}")
+                    # Check if model has parameters before getting device
+                    try:
+                        model_device = next(model.parameters()).device
+                        if not devices_match(model_device, device):
+                            print(f"⚠️  Moving {name} from {model_device} to {device}")
+                            models[name] = model.to(device)
+                    except StopIteration:
+                        # Model has no parameters (e.g., KineFeat), still move it to device
+                        print(f"⚠️  Moving {name} (no parameters) to {device}")
                         models[name] = model.to(device)
             
             # Process through branch models (no gradients needed)
