@@ -36,7 +36,7 @@ def demonstrate_both_gui_changes():
     print("│ 🧠 Memory-Efficient Training Active                            │")
     print("│                                                                 │")
     print("│ This mode enables several optimizations for GPU memory:        │")
-    print("│ • BF16 Mixed Precision: ~50% memory reduction                  │")
+    print("│ • FP16 Mixed Precision: ~50% memory reduction                  │")
     print("│ • Activation Checkpointing: Trade computation for memory       │")
     print("│ • 8-bit Optimizers: AdamW8bit for reduced optimizer states     │")
     print("│ • DeepSpeed ZeRO-2: CPU optimizer offload                      │")
@@ -52,7 +52,7 @@ def demonstrate_both_gui_changes():
     print("")
     print("MEMORY-EFFICIENT ENGINE:")
     print("  Training: python -m trident.runtime.memory_efficient_cli \\")
-    print("           --use-bf16 --checkpoint-every-layer --grad-accum-steps 8 \\")
+    print("           --use-fp16 --checkpoint-every-layer --grad-accum-steps 4 \\")
     print("           --optimizer adamw8bit --zero-stage 2 ...")
     print("  Evaluation: python -m trident.runtime.cli eval ... (fallback)")
     

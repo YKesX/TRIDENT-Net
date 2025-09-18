@@ -293,7 +293,7 @@ def main():
             "Training Engine", 
             ["Standard", "Memory-Efficient"], 
             index=0, 
-            help="Choose between standard training pipeline or memory-efficient training with optimizations (BF16, checkpointing, 8-bit optimizers)"
+            help="Choose between standard training pipeline or memory-efficient training with optimizations (FP16, checkpointing, 8-bit optimizers)"
         )
     with cfg_cols[3]:
         use_synth = st.toggle("Use synthetic", value=False, help="Feed synthetic data batches into the CLI instead of reading dataset folders. Metrics are computed on these synthetic batches (no fake charts).")
@@ -303,14 +303,15 @@ def main():
         st.info("""
         🧠 **Memory-Efficient Training Active**
         
-        This mode enables several optimizations for GPU memory constraints:
-        • **BF16 Mixed Precision**: ~50% memory reduction
+        This mode supports both GPU training and CPU evaluation systems:
+        • **FP16 Mixed Precision**: ~50% memory reduction (auto-disabled on CPU)
         • **Activation Checkpointing**: Trade computation for memory
-        • **8-bit Optimizers**: AdamW8bit for reduced optimizer states
-        • **DeepSpeed ZeRO-2**: CPU optimizer offload
-        • **Gradient Accumulation**: Micro-batching (8 steps default)
+        • **8-bit Optimizers**: AdamW8bit for reduced optimizer states (auto-disabled on CPU)
+        • **DeepSpeed ZeRO-2**: CPU optimizer offload (auto-disabled on CPU)
+        • **Gradient Accumulation**: Micro-batching (4 steps default)
+        • **CPU Compatibility**: Automatic fallback for CPU-only systems
         
-        Ideal for training on single GPU with <39GB VRAM (e.g., A100-40GB).
+        Training: A100 39GB + 70GB RAM | Evaluation: CPU-only + 30GB RAM
         """)
 
     st.markdown("---")
@@ -325,6 +326,27 @@ def main():
             nw_override = st.number_input("Workers", min_value=0, value=0, step=1)
         with lc3:
             pinmem = st.checkbox("Pin memory", value=False)
+
+    # Memory-efficient training settings
+    with st.container():
+        st.markdown("<div class='apple-title'>Memory-Efficient Settings</div>", unsafe_allow_html=True)
+        mc1, mc2 = st.columns([1,1])
+        with mc1:
+            grad_accum_steps = st.number_input(
+                "Gradient accumulation steps", 
+                min_value=1, max_value=16, value=4, step=1,
+                help="Number of gradient accumulation steps (lower = less memory, more frequent updates)"
+            )
+        with mc2:
+            deepspeed_config = st.selectbox(
+                "DeepSpeed Configuration",
+                ["Auto (based on device)", 
+                 "configs/a100_39gb_70gb_ram_training.json",
+                 "configs/cpu_only_30gb_ram.json", 
+                 "configs/a100_39gb_30gb_cpu.json"],
+                index=0,
+                help="Select hardware-specific configuration or let system auto-detect"
+            )
 
     # Checkpointing
     with st.container():
@@ -451,15 +473,26 @@ def main():
             
             if mode == "train" or mode == "finaltrain":
                 if training_engine == "Memory-Efficient":
+                    # Determine DeepSpeed config based on selection
+                    if deepspeed_config == "Auto (based on device)":
+                        # Auto-select based on device choice
+                        if device_choice == "CPU":
+                            selected_config = "configs/cpu_only_30gb_ram.json"
+                        else:
+                            selected_config = "configs/a100_39gb_70gb_ram_training.json"
+                    else:
+                        selected_config = deepspeed_config
+                    
                     # Use memory-efficient CLI
                     cmd = [
                         py, "-m", cli_module,
                         "--config", config_path,
-                        "--use-bf16",  # Enable BF16 by default
+                        "--use-fp16",  # Enable FP16 by default
                         "--checkpoint-every-layer",  # Enable checkpointing
-                        "--grad-accum-steps", "8",  # Default gradient accumulation
+                        "--grad-accum-steps", str(int(grad_accum_steps)),  # Configurable gradient accumulation
                         "--optimizer", "adamw8bit",  # Use 8-bit optimizer
                         "--zero-stage", "2",  # DeepSpeed ZeRO-2 by default
+                        "--deepspeed-config", selected_config,  # Use selected config
                     ]
                 else:
                     # Use standard CLI
