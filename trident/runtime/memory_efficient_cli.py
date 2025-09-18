@@ -136,7 +136,7 @@ def command_train_memory_efficient(args) -> None:
     # Validate configuration
     if args.zero_stage > 0 and args.optimizer in ["adamw8bit", "paged_adamw8bit"]:
         print(f"⚠️  WARNING: DeepSpeed ZeRO stage {args.zero_stage} will override 8-bit optimizer settings.")
-        print(f"   DeepSpeed will use DeepSpeedCPUAdam for CPU offload instead of {args.optimizer}.")
+        print(f"   DeepSpeed will use its own AdamW optimizer for CPU offload instead of {args.optimizer}.")
     
     if args.zero_stage > 0 and args.device_map == "auto":
         print(f"⚠️  WARNING: Using both DeepSpeed ZeRO and Accelerate device mapping is not recommended.")

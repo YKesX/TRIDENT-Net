@@ -343,7 +343,7 @@ class MemoryEfficientTrainer(Trainer):
             "micro_batch_per_gpu": micro_batch_per_gpu,
             "gradient_accumulation_steps": self.grad_accum_steps,
             "optimizer": {
-                "type": "DeepSpeedCPUAdam",
+                "type": "AdamW",
                 "params": {
                     "lr": 2e-4,
                     "betas": [0.9, 0.999],
