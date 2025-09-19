@@ -203,49 +203,53 @@ def command_train_memory_efficient(args) -> None:
         
         print(f"🔧 Processing large video (T={T}) in chunks of {chunk_size} frames")
         
-        # Process in overlapping chunks and average results
-        chunk_outputs = []
-        for start_idx in range(0, T, chunk_size - overlap):
-            end_idx = min(start_idx + chunk_size, T)
-            if end_idx - start_idx < 3:  # Skip chunks that are too small
-                break
-                
-            chunk = video_tensor[:, :, start_idx:end_idx]
-            with torch.no_grad():
-                chunk_out = model(chunk)
-                chunk_outputs.append(chunk_out)
-                
-            # Clear cache after each chunk
-            if video_tensor.device.type == 'cuda':
+        # Check if we need emergency mode due to memory constraints
+        try:
+            # Try to process normally first
+            return model(video_tensor)
+        except (RuntimeError, torch.cuda.OutOfMemoryError) as e:
+            if "out of memory" in str(e).lower():
+                print(f"⚠️ GPU memory exhausted, switching to emergency mode")
                 torch.cuda.empty_cache()
+            else:
+                # For other errors, re-raise them
+                raise e
         
-        # Average outputs from all chunks
-        if len(chunk_outputs) > 1:
-            # Average the feature outputs
-            averaged_output = {}
-            for key in chunk_outputs[0].keys():
-                stacked = torch.stack([out[key] for out in chunk_outputs])
-                averaged_output[key] = stacked.mean(dim=0)
-            return averaged_output
-        else:
-            # Emergency fallback: use specific temporal frames at 1300ms, 2000ms, 6000ms
-            B, C, T, H, W = video_tensor.shape
-            total_duration_ms = 8000  # All videos are 8000ms
-            
-            # Calculate frame indices for specific timestamps
-            frame_1300ms = int((1300 / total_duration_ms) * T)
-            frame_2000ms = int((2000 / total_duration_ms) * T) 
-            frame_6000ms = int((6000 / total_duration_ms) * T)
-            
-            # Ensure indices are within bounds
-            frame_1300ms = min(frame_1300ms, T-1)
-            frame_2000ms = min(frame_2000ms, T-1)
-            frame_6000ms = min(frame_6000ms, T-1)
-            
-            selected_frames = [frame_1300ms, frame_2000ms, frame_6000ms]
-            emergency_tensor = video_tensor[:, :, selected_frames]
-            
+        # Emergency fallback: use specific temporal frames at 1300ms, 2000ms, 6000ms
+        print("🚨 Emergency mode: Processing specific frames at 1300ms, 2000ms, and 6000ms")
+        total_duration_ms = 8000  # All videos are 8000ms
+        
+        # Calculate frame indices for specific timestamps
+        frame_1300ms = int((1300 / total_duration_ms) * T)
+        frame_2000ms = int((2000 / total_duration_ms) * T) 
+        frame_6000ms = int((6000 / total_duration_ms) * T)
+        
+        # Ensure indices are within bounds
+        frame_1300ms = max(0, min(frame_1300ms, T-1))
+        frame_2000ms = max(0, min(frame_2000ms, T-1))
+        frame_6000ms = max(0, min(frame_6000ms, T-1))
+        
+        # Ensure unique indices (in case of very short videos)
+        selected_frames = list(dict.fromkeys([frame_1300ms, frame_2000ms, frame_6000ms]))
+        
+        # If we still have too few frames, add some more
+        while len(selected_frames) < 3 and len(selected_frames) < T:
+            for i in range(T):
+                if i not in selected_frames:
+                    selected_frames.append(i)
+                    if len(selected_frames) >= 3:
+                        break
+        
+        emergency_tensor = video_tensor[:, :, selected_frames]
+        
+        try:
             return model(emergency_tensor)
+        except (RuntimeError, torch.cuda.OutOfMemoryError):
+            # Ultimate fallback: process even fewer frames
+            print("🚨 Ultimate fallback: Processing single frame")
+            torch.cuda.empty_cache()
+            single_frame = video_tensor[:, :, [frame_2000ms]]  # Use the middle frame
+            return model(single_frame)
 
     # Preprocessing function to convert raw batch to fusion input format
     def preprocess_batch_for_fusion(batch, models, device):
