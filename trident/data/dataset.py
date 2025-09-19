@@ -21,6 +21,7 @@ from torch.utils.data import Dataset, DataLoader
 from .video_ring import VideoRing
 from .transforms import AlbuStereoClip
 from .collate import pad_tracks_collate
+from .synthetic import synthetic_jsonl
 
 
 logger = logging.getLogger(__name__)
@@ -179,9 +180,14 @@ class VideoJsonlDataset(Dataset):
             raise ValueError(f"Missing RGB path in record {idx}")
         ir_path = _resolve_path(self.video_root, ir_rel) if ir_rel else None
 
-        # Video rings
-        rgb_ring = VideoRing(str(rgb_path), fps_hint=fps)
-        rgb_ring.load_all()
+        # Video rings - handle missing video files gracefully for CPU-only scenarios
+        if rgb_path and rgb_path.exists():
+            rgb_ring = VideoRing(str(rgb_path), fps_hint=fps)
+            rgb_ring.load_all()
+        else:
+            logger.warning(f"RGB video file missing for record {idx}: {rgb_path}, will use synthetic RGB data")
+            rgb_ring = None
+            
         if ir_path and ir_path.exists():
             ir_ring = VideoRing(str(ir_path), fps_hint=fps)
             ir_ring.load_all()
@@ -192,7 +198,25 @@ class VideoJsonlDataset(Dataset):
         times = _default_times(rec)
 
         # Slice windows
-        rgb_slices = rgb_ring.freeze_and_slice(self.pre_ms, self.fire_ms, self.post_ms, t0_ms=times.get("shoot_ms", 0))
+        if rgb_ring is not None:
+            rgb_slices = rgb_ring.freeze_and_slice(self.pre_ms, self.fire_ms, self.post_ms, t0_ms=times.get("shoot_ms", 0))
+        else:
+            # Create synthetic RGB frames when video file is missing
+            def ms_to_frames(ms: int) -> int:
+                return max(1, int(round((ms / 1000.0) * fps)))
+            
+            n_pre = ms_to_frames(self.pre_ms)
+            n_fire = ms_to_frames(self.fire_ms)
+            n_post = ms_to_frames(self.post_ms)
+            
+            # Generate synthetic RGB frames (random noise for now)
+            import numpy as np
+            synthetic_frame = np.random.randint(0, 255, (NATIVE_H, NATIVE_W, 3), dtype=np.uint8)
+            rgb_slices = {
+                "pre": [synthetic_frame.copy() for _ in range(n_pre)],
+                "fire": [synthetic_frame.copy() for _ in range(n_fire)],
+                "post": [synthetic_frame.copy() for _ in range(n_post)],
+            }
         if ir_ring is not None:
             ir_slices = ir_ring.freeze_and_slice(self.pre_ms, self.fire_ms, self.post_ms, t0_ms=times.get("shoot_ms", 0))
         else:
@@ -292,6 +316,22 @@ def create_data_loaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, Optional[DataL
     transforms_cfg = dataset_cfg.get("transforms", {})
 
     preprocess = cfg.get("preprocess", {})
+
+    # Check if JSONL file exists, if not create a synthetic one for CPU-only scenarios
+    if jsonl_path and not Path(jsonl_path).exists():
+        logger.warning(f"JSONL file not found: {jsonl_path}")
+        logger.info("Creating synthetic JSONL file for CPU-only training")
+        
+        # Create synthetic JSONL file in a temporary location instead of the original path
+        import tempfile
+        temp_dir = Path(tempfile.gettempdir()) / "trident_synthetic"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        synthetic_path = temp_dir / "synthetic_data.jsonl"
+        
+        # Generate synthetic data
+        synthetic_jsonl(str(synthetic_path), video_root, n=16)
+        jsonl_path = str(synthetic_path)
+        logger.info(f"Created synthetic JSONL file: {jsonl_path}")
 
     dataset = VideoJsonlDataset(
         jsonl_path=jsonl_path,
