@@ -534,16 +534,17 @@ class MemoryEfficientTrainer(Trainer):
                         self.logger.error(f"Micro batch keys: {list(micro_batch.keys())}")
                         self.logger.error(f"Micro batch shapes: {[(k, v.shape if isinstance(v, torch.Tensor) else type(v)) for k, v in micro_batch.items()]}")
                         raise
-                
-                # Calculate loss (this would depend on your specific loss function)
-                if isinstance(outputs, dict) and 'loss' in outputs:
-                    loss = outputs['loss']
-                else:
-                    # Fallback - you'd implement your specific loss calculation here
-                    loss = torch.tensor(0.0, device=self.device, requires_grad=True)
-                
-                # Scale loss for gradient accumulation
-                loss = loss / self.grad_accum_steps
+            
+            # Calculate loss (this would depend on your specific loss function)
+            # This needs to be outside the if/else to work for both DeepSpeed and non-DeepSpeed paths
+            if isinstance(outputs, dict) and 'loss' in outputs:
+                loss = outputs['loss']
+            else:
+                # Fallback - you'd implement your specific loss calculation here
+                loss = torch.tensor(0.0, device=self.device, requires_grad=True)
+            
+            # Scale loss for gradient accumulation
+            loss = loss / self.grad_accum_steps
             
             # Backward pass
             if self.use_deepspeed:
