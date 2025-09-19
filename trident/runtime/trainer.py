@@ -35,6 +35,7 @@ def setup_deterministic_training(seed: int = 12345, cudnn_deterministic: bool = 
     """
     import random
     import numpy as np
+    import os
 
     random.seed(seed)
     np.random.seed(seed)
@@ -42,6 +43,13 @@ def setup_deterministic_training(seed: int = 12345, cudnn_deterministic: bool = 
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
+    
+    # Set CUBLAS_WORKSPACE_CONFIG before enabling deterministic algorithms
+    # Required for CUDA >= 10.2 when using deterministic algorithms
+    if cudnn_deterministic and torch.cuda.is_available():
+        if 'CUBLAS_WORKSPACE_CONFIG' not in os.environ:
+            os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+    
     if hasattr(torch, 'use_deterministic_algorithms'):
         torch.use_deterministic_algorithms(cudnn_deterministic)
     if torch.backends.cudnn.is_available():
@@ -89,6 +97,7 @@ class Trainer:
         """Setup deterministic training based on environment configuration."""
         import random
         import numpy as np
+        import os
         
         # Get environment settings from config
         env_config = getattr(self.config, 'environment', {})
@@ -120,6 +129,13 @@ class Trainer:
         if torch.cuda.is_available():
             torch.cuda.manual_seed(seed)
             torch.cuda.manual_seed_all(seed)
+            
+        # Set CUBLAS_WORKSPACE_CONFIG before enabling deterministic algorithms
+        # Required for CUDA >= 10.2 when using deterministic algorithms
+        if cudnn_deterministic and torch.cuda.is_available():
+            if 'CUBLAS_WORKSPACE_CONFIG' not in os.environ:
+                os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+                self.logger.info("Set CUBLAS_WORKSPACE_CONFIG=:4096:8 for deterministic CuBLAS operations")
             
         # Set deterministic algorithms
         if hasattr(torch, 'use_deterministic_algorithms'):
