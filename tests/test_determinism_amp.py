@@ -7,13 +7,12 @@ Author: Yağızhan Keskin
 """
 
 import torch
-import pytest
 import sys
 import os
 import tempfile
 sys.path.append('.')
 
-from trident.runtime.trainer import Trainer
+from trident.runtime.trainer import Trainer, setup_deterministic_training
 from trident.runtime.config import ConfigLoader
 from trident.fusion_guard.cross_attn_fusion import CrossAttnFusion
 
@@ -231,6 +230,51 @@ def test_trainer_amp_configuration():
         os.unlink(config_file)
 
 
+def test_cublas_workspace_config():
+    """Test that CUBLAS_WORKSPACE_CONFIG is set when deterministic algorithms are enabled."""
+    print("🧪 Testing CUBLAS_WORKSPACE_CONFIG setup...")
+    
+    import os
+    from trident.runtime.trainer import setup_deterministic_training
+    
+    # Clear any existing CUBLAS_WORKSPACE_CONFIG
+    original_config = os.environ.get('CUBLAS_WORKSPACE_CONFIG')
+    if 'CUBLAS_WORKSPACE_CONFIG' in os.environ:
+        del os.environ['CUBLAS_WORKSPACE_CONFIG']
+    
+    try:
+        # Setup deterministic training (should set CUBLAS_WORKSPACE_CONFIG)
+        setup_deterministic_training(seed=42, cudnn_deterministic=True)
+        
+        # Check that CUBLAS_WORKSPACE_CONFIG was set
+        if torch.cuda.is_available():
+            assert 'CUBLAS_WORKSPACE_CONFIG' in os.environ, \
+                "CUBLAS_WORKSPACE_CONFIG should be set when CUDA is available and deterministic=True"
+            config_value = os.environ['CUBLAS_WORKSPACE_CONFIG']
+            assert config_value in [':4096:8', ':16:8'], \
+                f"CUBLAS_WORKSPACE_CONFIG should be ':4096:8' or ':16:8', got '{config_value}'"
+            print(f"✅ CUBLAS_WORKSPACE_CONFIG set to: {config_value}")
+        else:
+            print("✅ CUBLAS_WORKSPACE_CONFIG test skipped (CUDA not available)")
+            
+        # Test with deterministic=False (should not set CUBLAS_WORKSPACE_CONFIG if not already set)
+        if 'CUBLAS_WORKSPACE_CONFIG' in os.environ:
+            del os.environ['CUBLAS_WORKSPACE_CONFIG']
+        
+        setup_deterministic_training(seed=42, cudnn_deterministic=False)
+        # CUBLAS_WORKSPACE_CONFIG should not be set for non-deterministic mode
+        # (but if it was already set externally, we shouldn't remove it)
+        
+        print("✅ CUBLAS_WORKSPACE_CONFIG test passed")
+        
+    finally:
+        # Restore original CUBLAS_WORKSPACE_CONFIG
+        if original_config is not None:
+            os.environ['CUBLAS_WORKSPACE_CONFIG'] = original_config
+        elif 'CUBLAS_WORKSPACE_CONFIG' in os.environ:
+            del os.environ['CUBLAS_WORKSPACE_CONFIG']
+
+
 def test_full_determinism_smoke():
     """Smoke test for full deterministic behavior with fixed seeds."""
     print("🧪 Testing full determinism smoke test...")
@@ -320,6 +364,7 @@ if __name__ == "__main__":
     test_amp_training_step()
     test_gradient_clipping()
     test_trainer_amp_configuration()
+    test_cublas_workspace_config()
     test_full_determinism_smoke()
     test_non_deterministic_behavior()
     print("✅ All determinism and AMP tests passed!")
