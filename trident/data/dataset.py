@@ -210,7 +210,6 @@ class VideoJsonlDataset(Dataset):
             n_post = ms_to_frames(self.post_ms)
             
             # Generate synthetic RGB frames (random noise for now)
-            import numpy as np
             synthetic_frame = np.random.randint(0, 255, (NATIVE_H, NATIVE_W, 3), dtype=np.uint8)
             rgb_slices = {
                 "pre": [synthetic_frame.copy() for _ in range(n_pre)],
