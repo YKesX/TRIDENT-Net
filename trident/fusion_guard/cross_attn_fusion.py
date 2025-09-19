@@ -188,6 +188,7 @@ class CrossAttnFusion(FusionModule):
         zr: torch.Tensor,
         class_ids: Optional[torch.Tensor] = None,
         events: Optional[List[EventToken]] = None,
+        labels: Optional[Dict[str, torch.Tensor]] = None,
     ):
         """
         Forward pass through CrossAttnFusion.
@@ -198,6 +199,7 @@ class CrossAttnFusion(FusionModule):
             zr: R-branch features (B, 384)
             class_ids: Class IDs (B,) or precomputed embeddings (B, e_cls)
             events: List of events from all modalities
+            labels: Labels for loss computation (ignored in forward pass)
 
         Returns:
             tuple: Non-tracing: (z_fused, p_hit, p_kill, attn_maps, top_events)
