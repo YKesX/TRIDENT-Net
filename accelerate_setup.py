@@ -18,7 +18,7 @@ def setup_accelerate_model(
     max_gpu_memory: str = "39GiB",
     max_cpu_memory: str = "70GiB",
     offload_folder: str = "./offload",
-    dtype: torch.dtype = torch.bfloat16
+    dtype: torch.dtype = torch.float16
 ) -> torch.nn.Module:
     """
     Setup model with Accelerate device mapping and CPU/disk offload.

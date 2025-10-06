@@ -96,9 +96,9 @@ Offloads optimizer states to CPU while keeping model parameters on GPU.
 ```bash
 deepspeed --num_gpus 1 -m trident.runtime.memory_efficient_cli \
   --config tasks.yml \
-  --use-bf16 \
+  --use-fp16 \
   --checkpoint-every-layer \
-  --grad-accum-steps 8 \
+  --grad-accum-steps 4 \
   --optimizer adamw8bit \
   --zero-stage 2 \
   --synthetic
@@ -118,7 +118,7 @@ Automatically distributes model layers across GPU/CPU based on memory constraint
 model = load_checkpoint_and_dispatch(
     model,
     device_map="auto",
-    max_memory={0: "39GiB", "cpu": "70GiB"},
+    max_memory={0: "39GiB", "cpu": "30GiB"},
     offload_folder="./offload"
 )
 ```
@@ -127,13 +127,13 @@ model = load_checkpoint_and_dispatch(
 ```bash
 python -m trident.runtime.memory_efficient_cli \
   --config tasks.yml \
-  --use-bf16 \
+  --use-fp16 \
   --checkpoint-every-layer \
-  --grad-accum-steps 8 \
+  --grad-accum-steps 4 \
   --optimizer paged_adamw8bit \
   --device-map auto \
   --max-gpu-mem 39GiB \
-  --cpu-mem 70GiB \
+  --cpu-mem 30GiB \
   --zero-stage 0 \
   --synthetic
 ```

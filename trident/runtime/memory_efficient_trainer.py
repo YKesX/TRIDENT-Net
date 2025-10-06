@@ -128,19 +128,31 @@ class MemoryEfficientTrainer(Trainer):
             **kwargs
         )
         
-        self.use_fp16 = use_fp16 and (torch.cuda.is_available() or torch.backends.mps.is_available())
+        # FP16 settings - disable on CPU-only systems
+        if use_fp16 and self.device.type != "cuda":
+            self.logger.warning("FP16 disabled: only supported on CUDA devices, using FP32")
+            self.use_fp16 = False
+        else:
+            self.use_fp16 = use_fp16 and (torch.cuda.is_available() or torch.backends.mps.is_available())
+        
         self.mixed_precision_dtype = mixed_precision_dtype if self.use_fp16 else torch.float32
         self.use_checkpointing = use_checkpointing
         self.checkpoint_modules = checkpoint_modules or [
             "transformer", "cross_attn", "VideoFrag3D", "TinyTempoFormer", 
             "CrossAttnFusion", "PlumeDetXL"
         ]
-        self.use_8bit_optimizer = use_8bit_optimizer and HAS_BITSANDBYTES
+        
+        # 8-bit optimizer settings - disable on CPU-only systems
+        self.use_8bit_optimizer = use_8bit_optimizer and HAS_BITSANDBYTES and torch.cuda.is_available()
+        if use_8bit_optimizer and not self.use_8bit_optimizer:
+            self.logger.warning("8-bit optimizer disabled: requires CUDA, falling back to standard optimizer")
         self.optimizer_type = optimizer_type
         self.grad_accum_steps = max(1, grad_accum_steps)
         
-        # DeepSpeed settings
-        self.use_deepspeed = use_deepspeed and HAS_DEEPSPEED
+        # DeepSpeed settings - disable on CPU-only systems
+        self.use_deepspeed = use_deepspeed and HAS_DEEPSPEED and torch.cuda.is_available()
+        if use_deepspeed and not self.use_deepspeed:
+            self.logger.warning("DeepSpeed disabled: requires CUDA")
         self.deepspeed_config = deepspeed_config
         
         # Accelerate settings
@@ -149,8 +161,10 @@ class MemoryEfficientTrainer(Trainer):
         self.max_cpu_memory = max_cpu_memory
         self.offload_folder = offload_folder
         
-        # QLoRA settings
-        self.use_qlora = use_qlora and HAS_BITSANDBYTES
+        # QLoRA settings - disable on CPU-only systems  
+        self.use_qlora = use_qlora and HAS_BITSANDBYTES and torch.cuda.is_available()
+        if use_qlora and not self.use_qlora:
+            self.logger.warning("QLoRA disabled: requires CUDA")
         
         # Setup memory-efficient scaler for FP16/FP32
         if self.use_fp16:
@@ -405,8 +419,11 @@ class MemoryEfficientTrainer(Trainer):
         # 3. Apply QLoRA if enabled
         model = self._apply_qlora(model)
         
-        # 4. Setup optimizer (before DeepSpeed)
-        optimizer = self._setup_8bit_optimizer(model)
+        # 4. Setup optimizer (skip if using DeepSpeed as it manages optimizer)
+        if not self.use_deepspeed:
+            optimizer = self._setup_8bit_optimizer(model)
+        else:
+            optimizer = None  # DeepSpeed will create its own optimizer
         
         # 5. Setup DeepSpeed or Accelerate
         if self.use_deepspeed:
@@ -463,6 +480,13 @@ class MemoryEfficientTrainer(Trainer):
                 else:
                     micro_batch[key] = value
             
+            # Move micro_batch to correct device (important for DeepSpeed compatibility)
+            if not self.use_accelerate:  # Accelerate handles device placement automatically
+                device = self.device if not self.use_deepspeed else next(model.parameters()).device
+                for key, value in micro_batch.items():
+                    if isinstance(value, torch.Tensor):
+                        micro_batch[key] = value.to(device)
+            
             # Forward pass - let DeepSpeed handle mixed precision if enabled
             if self.use_deepspeed:
                 # DeepSpeed handles mixed precision internally
@@ -510,16 +534,17 @@ class MemoryEfficientTrainer(Trainer):
                         self.logger.error(f"Micro batch keys: {list(micro_batch.keys())}")
                         self.logger.error(f"Micro batch shapes: {[(k, v.shape if isinstance(v, torch.Tensor) else type(v)) for k, v in micro_batch.items()]}")
                         raise
-                
-                # Calculate loss (this would depend on your specific loss function)
-                if isinstance(outputs, dict) and 'loss' in outputs:
-                    loss = outputs['loss']
-                else:
-                    # Fallback - you'd implement your specific loss calculation here
-                    loss = torch.tensor(0.0, device=self.device, requires_grad=True)
-                
-                # Scale loss for gradient accumulation
-                loss = loss / self.grad_accum_steps
+            
+            # Calculate loss (this would depend on your specific loss function)
+            # This needs to be outside the if/else to work for both DeepSpeed and non-DeepSpeed paths
+            if isinstance(outputs, dict) and 'loss' in outputs:
+                loss = outputs['loss']
+            else:
+                # Fallback - you'd implement your specific loss calculation here
+                loss = torch.tensor(0.0, device=self.device, requires_grad=True)
+            
+            # Scale loss for gradient accumulation
+            loss = loss / self.grad_accum_steps
             
             # Backward pass
             if self.use_deepspeed:

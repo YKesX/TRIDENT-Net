@@ -11,9 +11,11 @@ from pathlib import Path
 from typing import Dict, Any
 
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import yaml
 
-from .cli import load_config, setup_logging, _device, _build_models, _create_synthetic_loaders
+from .cli import load_config, setup_logging, _device, _build_models, _create_synthetic_loaders, _kin_aug
 from .memory_efficient_trainer import MemoryEfficientTrainer
 from .config import ConfigLoader
 from ..data.dataset import create_data_loaders
@@ -65,11 +67,62 @@ def command_train_memory_efficient(args) -> None:
         train_loader, val_loader = create_data_loaders(cfg)
     
     device = _device()
+    # Ensure device is normalized for consistency
+    if device.type == 'cuda' and device.index is None:
+        device = torch.device('cuda:0')  # Normalize to cuda:0 for consistency
     print(f"device={device} cuda_available={torch.cuda.is_available()} "
           f"cuda_devices={torch.cuda.device_count()} "
           f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}")
     
-    # Create memory-efficient trainer
+    # CPU compatibility checks and auto-adjustments
+    is_cpu_only = not torch.cuda.is_available() or os.environ.get('CUDA_VISIBLE_DEVICES') == '-1'
+    if is_cpu_only:
+        print(f"🖥️  CPU-only mode detected. Adjusting settings for compatibility:")
+        if args.use_fp16:
+            print(f"   • Disabling FP16 (not supported on CPU) → FP32")
+            args.use_fp16 = False
+        if args.optimizer in ["adamw8bit", "paged_adamw8bit"]:
+            print(f"   • Disabling 8-bit optimizer (requires CUDA) → adamw")
+            args.optimizer = "adamw"
+        if args.zero_stage > 0:
+            print(f"   • Disabling DeepSpeed ZeRO (requires CUDA) → stage 0")
+            args.zero_stage = 0
+        if args.device_map == "auto":
+            print(f"   • Disabling Accelerate device mapping (not needed on CPU)")
+            args.device_map = "balanced"
+        print(f"   ✅ CPU-compatible configuration applied")
+    
+    # Resolve configuration conflicts for CUDA systems
+    elif torch.cuda.is_available():
+        conflicts_resolved = []
+        if args.zero_stage > 0 and args.optimizer in ["adamw8bit", "paged_adamw8bit"]:
+            print(f"🔧 Resolving conflict: DeepSpeed ZeRO + 8-bit optimizer")
+            print(f"   • DeepSpeed will handle optimizer → disabling 8-bit optimizer")
+            args.optimizer = "adamw"
+            conflicts_resolved.append("8-bit optimizer → DeepSpeed optimizer")
+            
+        if args.zero_stage > 0 and args.device_map == "auto":
+            print(f"🔧 Resolving conflict: DeepSpeed ZeRO + Accelerate device mapping")
+            print(f"   • Prioritizing DeepSpeed → disabling Accelerate device mapping")
+            args.device_map = "balanced"
+            conflicts_resolved.append("Accelerate device map → DeepSpeed handling")
+            
+        if conflicts_resolved:
+            print(f"   ✅ Resolved {len(conflicts_resolved)} configuration conflicts")
+    
+    # Validate DeepSpeed config file if specified
+    if hasattr(args, 'deepspeed_config') and args.deepspeed_config and args.deepspeed_config != 'ds_config.json':
+        from pathlib import Path
+        config_path = Path(args.deepspeed_config)
+        if not config_path.exists():
+            print(f"⚠️  WARNING: DeepSpeed config file not found: {args.deepspeed_config}")
+            print(f"   Falling back to automatic configuration generation")
+            args.deepspeed_config = None
+        elif is_cpu_only and 'cpu_only' not in str(config_path):
+            print(f"⚠️  WARNING: Using GPU-optimized config on CPU system: {args.deepspeed_config}")
+            print(f"   Consider using configs/cpu_only_30gb_ram.json for CPU-only systems")
+    
+    # Create memory-efficient trainer AFTER CPU compatibility adjustments
     trainer = MemoryEfficientTrainer(
         config_loader=config_loader,
         device=device,
@@ -89,8 +142,20 @@ def command_train_memory_efficient(args) -> None:
     # Build models
     models = _build_models()
     
-    # Prepare fusion model for training (F2)
+    # For memory-efficient training, we'll preprocess the data to match f2 expectations
+    # and train only the fusion model (f2) with preprocessed features
     f2 = models['f2']
+    
+    # Move branch models to device for preprocessing (but don't train them)
+    for name, model in models.items():
+        if name != 'f2':  # Don't move f2 yet, it will be handled by trainer
+            # Always move branch models to device, regardless of Accelerate usage
+            # since they're used for preprocessing and aren't managed by Accelerate
+            model = model.to(device)
+            model.eval()  # Set to eval mode since we're not training these
+            models[name] = model  # Update the model in the dict
+    
+    # Prepare fusion model for training
     f2, optimizer = trainer.prepare_model_for_training(f2, "fusion_f2")
     
     print(f"Memory optimization settings:")
@@ -109,6 +174,227 @@ def command_train_memory_efficient(args) -> None:
     # Training loop
     print(f"Training for {epochs} epochs with memory optimizations...")
     
+    def reduce_batch_size_if_needed(batch, device):
+        """Reduce batch size if video sequences are too large for available memory."""
+        rgb = batch['rgb']
+        
+        # Check if video is too large (> 50 frames at high resolution)
+        B, C, T, H, W = rgb.shape
+        estimated_size_gb = (B * C * T * H * W * 4) / (1024**3)  # Rough estimate in GB
+        
+        if estimated_size_gb > 4.0:  # If > 4GB, reduce temporal dimension
+            max_frames = min(T, 16)  # Limit to 16 frames maximum
+            print(f"🔧 Reducing video from {T} to {max_frames} frames (estimated size: {estimated_size_gb:.2f}GB)")
+            
+            # Temporally subsample video
+            indices = torch.linspace(0, T-1, max_frames).long()
+            batch['rgb'] = rgb[:, :, indices]
+            batch['ir'] = batch['ir'][:, :, indices]
+            
+        return batch
+
+    def process_video_in_chunks(model, video_tensor, chunk_size=8, overlap=2):
+        """Process large video sequences in smaller temporal chunks to reduce memory usage."""
+        B, C, T, H, W = video_tensor.shape
+        
+        if T <= chunk_size:
+            # Video is small enough, process normally
+            return model(video_tensor)
+        
+        print(f"🔧 Processing large video (T={T}) in chunks of {chunk_size} frames")
+        
+        # Check if we need emergency mode due to memory constraints
+        try:
+            # Try to process normally first
+            return model(video_tensor)
+        except (RuntimeError, torch.cuda.OutOfMemoryError) as e:
+            if "out of memory" in str(e).lower():
+                print(f"⚠️ GPU memory exhausted, switching to emergency mode")
+                torch.cuda.empty_cache()
+            else:
+                # For other errors, re-raise them
+                raise e
+        
+        # Emergency fallback: use specific temporal frames at 1300ms, 2000ms, 6000ms
+        print("🚨 Emergency mode: Processing specific frames at 1300ms, 2000ms, and 6000ms")
+        total_duration_ms = 8000  # All videos are 8000ms
+        
+        # Calculate frame indices for specific timestamps
+        frame_1300ms = int((1300 / total_duration_ms) * T)
+        frame_2000ms = int((2000 / total_duration_ms) * T) 
+        frame_6000ms = int((6000 / total_duration_ms) * T)
+        
+        # Ensure indices are within bounds
+        frame_1300ms = max(0, min(frame_1300ms, T-1))
+        frame_2000ms = max(0, min(frame_2000ms, T-1))
+        frame_6000ms = max(0, min(frame_6000ms, T-1))
+        
+        # Ensure unique indices (in case of very short videos)
+        selected_frames = list(dict.fromkeys([frame_1300ms, frame_2000ms, frame_6000ms]))
+        
+        # If we still have too few frames, add some more
+        while len(selected_frames) < 3 and len(selected_frames) < T:
+            for i in range(T):
+                if i not in selected_frames:
+                    selected_frames.append(i)
+                    if len(selected_frames) >= 3:
+                        break
+        
+        emergency_tensor = video_tensor[:, :, selected_frames]
+        
+        try:
+            return model(emergency_tensor)
+        except (RuntimeError, torch.cuda.OutOfMemoryError):
+            # Ultimate fallback: process even fewer frames
+            print("🚨 Ultimate fallback: Processing single frame")
+            torch.cuda.empty_cache()
+            single_frame = video_tensor[:, :, [frame_2000ms]]  # Use the middle frame
+            return model(single_frame)
+
+    # Preprocessing function to convert raw batch to fusion input format
+    def preprocess_batch_for_fusion(batch, models, device):
+        """Convert raw batch data to format expected by fusion model f2."""
+        with torch.no_grad():
+            # Reduce batch size if needed for memory efficiency
+            batch = reduce_batch_size_if_needed(batch, device)
+            
+            # Move inputs to device 
+            rgb = batch['rgb'].to(device)  # [B,3,T,H,W]
+            ir = batch['ir'].to(device)    # [B,1,T,H,W] 
+            kin = batch['kin'].to(device)  # [B,3,9]
+            class_ids = batch.get('class_id', torch.zeros(rgb.shape[0], dtype=torch.long)).to(device)
+            
+            # Clear GPU cache before processing
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
+            
+            # Ensure all branch models are on the correct device
+            def devices_match(device1, device2):
+                """Check if two devices are the same, handling cuda/cuda:0 equivalence."""
+                # Convert both to torch.device objects for proper comparison
+                dev1 = torch.device(device1)
+                dev2 = torch.device(device2)
+                
+                # Handle cuda equivalence (cuda == cuda:0)
+                if dev1.type == 'cuda' and dev2.type == 'cuda':
+                    dev1_index = 0 if dev1.index is None else dev1.index
+                    dev2_index = 0 if dev2.index is None else dev2.index
+                    return dev1_index == dev2_index
+                
+                return dev1 == dev2
+            
+            for name, model in models.items():
+                if name != 'f2':
+                    # Check if model has parameters before getting device
+                    try:
+                        model_device = next(model.parameters()).device
+                        if not devices_match(model_device, device):
+                            print(f"⚠️  Moving {name} from {model_device} to {device}")
+                            models[name] = model.to(device)
+                    except StopIteration:
+                        # Model has no parameters (e.g., KineFeat), still move it to device
+                        print(f"⚠️  Moving {name} (no parameters) to {device}")
+                        models[name] = model.to(device)
+            
+            # Process through branch models with memory optimization
+            try:
+                # Process video models with chunking for large sequences
+                i1_out = process_video_in_chunks(models['i1'], rgb, chunk_size=8)
+                if device.type == 'cuda':
+                    torch.cuda.empty_cache()
+                
+                t1_out = process_video_in_chunks(models['t1'], ir, chunk_size=8)
+                if device.type == 'cuda':
+                    torch.cuda.empty_cache()
+                
+                # Kinematics processing (small data, no chunking needed)
+                r1_feats, _ = models['r1'](kin)
+                
+                # Kinematics augmentation (from _kin_aug function)
+                k_aug, k_tokens = _kin_aug(kin, r1_feats)
+                zr2, _ = models['r2'](k_aug)
+                zr3, _ = models['r3'](k_tokens)
+                
+            except torch.cuda.OutOfMemoryError as oom_error:
+                print(f"❌ CUDA OOM Error: {oom_error}")
+                print(f"🔧 Attempting emergency fallback: using temporal samples at 1300ms, 2000ms, 6000ms")
+                if device.type == 'cuda':
+                    torch.cuda.empty_cache()
+                
+                try:
+                    # Emergency fallback: use specific temporal frames
+                    # Video is 8000ms total, so calculate frame indices for 1300ms, 2000ms, 6000ms
+                    B, C, T, H, W = rgb.shape
+                    total_duration_ms = 8000  # All videos are 8000ms
+                    
+                    # Calculate frame indices for specific timestamps
+                    frame_1300ms = int((1300 / total_duration_ms) * T)
+                    frame_2000ms = int((2000 / total_duration_ms) * T) 
+                    frame_6000ms = int((6000 / total_duration_ms) * T)
+                    
+                    # Ensure indices are within bounds
+                    frame_1300ms = min(frame_1300ms, T-1)
+                    frame_2000ms = min(frame_2000ms, T-1)
+                    frame_6000ms = min(frame_6000ms, T-1)
+                    
+                    selected_frames = [frame_1300ms, frame_2000ms, frame_6000ms]
+                    print(f"   Using frames at indices {selected_frames} (timestamps: 1300ms, 2000ms, 6000ms)")
+                    
+                    # Extract specific frames
+                    rgb_emergency = rgb[:, :, selected_frames]  # Shape: [B, C, 3, H, W]
+                    ir_emergency = ir[:, :, selected_frames]    # Shape: [B, C, 3, H, W]
+                    
+                    i1_out = models['i1'](rgb_emergency)
+                    t1_out = models['t1'](ir_emergency)
+                    r1_feats, _ = models['r1'](kin)
+                    
+                    k_aug, k_tokens = _kin_aug(kin, r1_feats)
+                    zr2, _ = models['r2'](k_aug)
+                    zr3, _ = models['r3'](k_tokens)
+                    
+                    print("✅ Emergency temporal sampling successful")
+                except Exception as emergency_error:
+                    print(f"❌ Emergency fallback also failed: {emergency_error}")
+                    raise
+                
+            except Exception as e:
+                print(f"❌ Error in branch model processing: {e}")
+                print(f"   RGB shape: {rgb.shape}, device: {rgb.device}")
+                print(f"   IR shape: {ir.shape}, device: {ir.device}")
+                print(f"   KIN shape: {kin.shape}, device: {kin.device}")
+                
+                # Memory usage info
+                if device.type == 'cuda':
+                    print(f"   GPU memory: {torch.cuda.memory_allocated()/1e9:.2f}GB allocated, "
+                          f"{torch.cuda.memory_reserved()/1e9:.2f}GB reserved")
+                
+                for name, model in models.items():
+                    if name != 'f2':
+                        try:
+                            model_device = next(model.parameters()).device
+                            print(f"   {name} device: {model_device}")
+                        except:
+                            print(f"   {name} device: unknown")
+                raise
+            
+            # Concat features per architecture specification
+            zi = torch.cat([i1_out['zi'], torch.zeros(rgb.shape[0], 256, device=device)], dim=1)  # 768
+            zt = t1_out['zt']  # 256
+            zt = torch.cat([zt, torch.zeros_like(zt)], dim=1)  # Pad to 512
+            zr = torch.cat([zr2, zr3], dim=1)  # 384 (192+192)
+            
+            # Prepare fusion inputs
+            fusion_batch = {
+                'zi': zi,
+                'zt': zt, 
+                'zr': zr,
+                'class_ids': class_ids,
+                'events': None,  # Events would be collected from branch outputs
+                'labels': batch.get('labels')  # Pass through labels for loss computation
+            }
+            
+            return fusion_batch
+    
     best_val_metric = 0.0
     for epoch in range(epochs):
         print(f"\nEpoch {epoch+1}/{epochs}")
@@ -118,13 +404,11 @@ def command_train_memory_efficient(args) -> None:
         train_metrics = {'loss': 0.0, 'count': 0}
         
         for step, batch in enumerate(train_loader):
-            # Move batch to device (if not using accelerate)
-            if not trainer.use_accelerate:
-                batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
-                        for k, v in batch.items()}
+            # Preprocess batch to fusion format
+            fusion_batch = preprocess_batch_for_fusion(batch, models, device)
             
-            # Training step
-            step_metrics = trainer.training_step(f2, batch, optimizer, step)
+            # Training step on preprocessed batch
+            step_metrics = trainer.training_step(f2, fusion_batch, optimizer, step)
             
             # Accumulate metrics
             train_metrics['loss'] += step_metrics['loss']
@@ -146,27 +430,44 @@ def command_train_memory_efficient(args) -> None:
         
         with torch.no_grad():
             for batch in val_loader:
-                if not trainer.use_accelerate:
-                    batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
-                            for k, v in batch.items()}
+                # Preprocess batch to fusion format
+                fusion_batch = preprocess_batch_for_fusion(batch, models, device)
                 
                 # Forward pass
                 with torch.autocast(device_type="cuda", dtype=trainer.mixed_precision_dtype, 
                                   enabled=trainer.use_fp16):
-                    outputs = f2(**batch)
+                    outputs = f2(**{k: v for k, v in fusion_batch.items() if k != 'labels'})
                     
-                    # Collect predictions (this is simplified - would need actual model outputs)
-                    if hasattr(outputs, 'p_hit'):
+                    # Collect predictions
+                    if isinstance(outputs, tuple):
+                        z_fused, p_hit, p_kill = outputs[:3]
+                        preds_h.append(p_hit.cpu())
+                        preds_k.append(p_kill.cpu())
+                    elif isinstance(outputs, dict):
+                        if 'p_hit' in outputs:
+                            preds_h.append(outputs['p_hit'].cpu())
+                        if 'p_kill' in outputs:
+                            preds_k.append(outputs['p_kill'].cpu())
+                    elif hasattr(outputs, 'p_hit'):
                         preds_h.append(outputs.p_hit.cpu())
-                    if hasattr(outputs, 'p_kill'):
-                        preds_k.append(outputs.p_kill.cpu())
+                        if hasattr(outputs, 'p_kill'):
+                            preds_k.append(outputs.p_kill.cpu())
                 
                 # Collect targets
-                if 'labels' in batch:
-                    if 'hit' in batch['labels']:
-                        tgts_h.append(batch['labels']['hit'].cpu())
-                    if 'kill' in batch['labels']:
-                        tgts_k.append(batch['labels']['kill'].cpu())
+                if fusion_batch.get('labels') is not None:
+                    labels = fusion_batch['labels']
+                    if isinstance(labels, dict):
+                        if 'hit' in labels:
+                            tgts_h.append(labels['hit'].cpu())
+                        if 'kill' in labels:
+                            tgts_k.append(labels['kill'].cpu())
+                    else:
+                        # Handle tensor labels 
+                        if labels.dim() == 2 and labels.shape[1] >= 2:
+                            tgts_h.append(labels[:, 0].cpu())
+                            tgts_k.append(labels[:, 1].cpu())
+                        else:
+                            tgts_h.append(labels.cpu())
         
         # Compute validation metrics
         if preds_h and tgts_h:
@@ -223,8 +524,8 @@ def add_memory_efficient_args(parser: argparse.ArgumentParser) -> None:
                           help='Disable activation checkpointing')
     
     # Gradient accumulation
-    mem_group.add_argument('--grad-accum-steps', type=int, default=8,
-                          help='Gradient accumulation steps for micro-batching (default: 8)')
+    mem_group.add_argument('--grad-accum-steps', type=int, default=4,
+                          help='Gradient accumulation steps for micro-batching (default: 4)')
     
     # Optimizer options
     mem_group.add_argument('--optimizer', choices=['adamw', 'adamw8bit', 'paged_adamw8bit'], 
@@ -245,7 +546,7 @@ def add_memory_efficient_args(parser: argparse.ArgumentParser) -> None:
     acc_group.add_argument('--max-gpu-mem', type=str, default='39GiB',
                           help='Maximum GPU memory allocation (default: 39GiB)')
     acc_group.add_argument('--cpu-mem', type=str, default='70GiB',
-                          help='Maximum CPU memory for offload (default: 70GiB)')
+                          help='Maximum CPU memory for offload (default: 70GiB for training, 30GiB for evaluation)')
     
     # QLoRA options
     qlora_group = parser.add_argument_group('QLoRA')

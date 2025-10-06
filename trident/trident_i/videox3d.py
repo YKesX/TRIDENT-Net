@@ -60,7 +60,7 @@ class VideoFrag3Dv2(nn.Module):
         
         # Build encoder layers
         self.encoder_blocks = nn.ModuleList()
-        self.encoder_pools = nn.ModuleList()
+        self.encoder_pool_channels = []  # Store channel info for dynamic pool creation
         
         in_ch = in_channels
         for i in range(depth):
@@ -72,15 +72,9 @@ class VideoFrag3Dv2(nn.Module):
             )
             self.encoder_blocks.append(block)
             
-            # Temporal pooling (except last layer)
+            # Store pooling info (except last layer)
             if i < depth - 1:
-                pool = nn.Conv3d(
-                    out_ch, out_ch,
-                    kernel_size=(temporal_stride, 2, 2),
-                    stride=(temporal_stride, 2, 2),
-                    padding=(0, 1, 1)
-                )
-                self.encoder_pools.append(pool)
+                self.encoder_pool_channels.append(out_ch)
             
             in_ch = out_ch
         
@@ -96,7 +90,7 @@ class VideoFrag3Dv2(nn.Module):
         
         # Build decoder layers
         self.decoder_blocks = nn.ModuleList()
-        self.decoder_upsamples = nn.ModuleList()
+        self.decoder_upsample_channels = []  # Store channel info for dynamic upsample creation
         
         # Track encoder channel dimensions for skip connections
         encoder_channels = []
@@ -110,15 +104,9 @@ class VideoFrag3Dv2(nn.Module):
         for i in range(depth):
             out_ch = encoder_channels[i]
             
-            # Upsample (except first decoder layer)
+            # Store upsample info (except first decoder layer)
             if i > 0:
-                upsample = nn.ConvTranspose3d(
-                    in_ch, in_ch // 2,
-                    kernel_size=(temporal_stride, 2, 2),
-                    stride=(temporal_stride, 2, 2),
-                    padding=(0, 0, 0)
-                )
-                self.decoder_upsamples.append(upsample)
+                self.decoder_upsample_channels.append(in_ch)
                 in_ch = in_ch // 2
             
             # Decoder block (with skip connection handling)
@@ -178,6 +166,60 @@ class VideoFrag3Dv2(nn.Module):
         
         return nn.Sequential(*layers)
     
+    def _create_adaptive_pool(self, channels: int, input_shape: Tuple[int, int, int]) -> nn.Module:
+        """Create adaptive pooling layer that adjusts kernel size based on input dimensions."""
+        T, H, W = input_shape
+        
+        # Determine temporal kernel/stride based on input temporal size
+        temporal_kernel = min(self.temporal_stride, T)
+        temporal_stride = min(self.temporal_stride, T)
+        
+        # For very small temporal dimensions, use 1x1 temporal kernel
+        if T == 1:
+            temporal_kernel = 1
+            temporal_stride = 1
+        
+        pool = nn.Conv3d(
+            channels, channels,
+            kernel_size=(temporal_kernel, 2, 2),
+            stride=(temporal_stride, 2, 2),
+            padding=(0, 1, 1)
+        )
+        
+        # Move to same device as the model
+        if hasattr(self, 'encoder_blocks') and len(self.encoder_blocks) > 0:
+            device = next(self.encoder_blocks[0].parameters()).device
+            pool = pool.to(device)
+        
+        return pool
+    
+    def _create_adaptive_upsample(self, in_channels: int, input_shape: Tuple[int, int, int]) -> nn.Module:
+        """Create adaptive upsampling layer that adjusts kernel size based on input dimensions."""
+        T, H, W = input_shape
+        
+        # Determine temporal kernel/stride based on input temporal size
+        temporal_kernel = min(self.temporal_stride, T * self.temporal_stride)
+        temporal_stride = min(self.temporal_stride, T * self.temporal_stride)
+        
+        # For very small temporal dimensions, use 1x1 temporal kernel
+        if T == 1:
+            temporal_kernel = 1
+            temporal_stride = 1
+        
+        upsample = nn.ConvTranspose3d(
+            in_channels, in_channels // 2,
+            kernel_size=(temporal_kernel, 2, 2),
+            stride=(temporal_stride, 2, 2),
+            padding=(0, 0, 0)
+        )
+        
+        # Move to same device as the model
+        if hasattr(self, 'encoder_blocks') and len(self.encoder_blocks) > 0:
+            device = next(self.encoder_blocks[0].parameters()).device
+            upsample = upsample.to(device)
+        
+        return upsample
+    
     def forward(self, rgb: torch.Tensor) -> Dict[str, Any]:
         """
         Forward pass through VideoFrag3Dv2.
@@ -198,9 +240,14 @@ class VideoFrag3Dv2(nn.Module):
         x = rgb
         
         # Encoder path
-        for i, (block, pool) in enumerate(zip(self.encoder_blocks[:-1], self.encoder_pools)):
+        for i, block in enumerate(self.encoder_blocks[:-1]):
             x = block(x)
             encoder_features.append(x)
+            
+            # Apply adaptive pooling
+            pool_channels = self.encoder_pool_channels[i]
+            current_shape = x.shape[2:]  # T, H, W
+            pool = self._create_adaptive_pool(pool_channels, current_shape)
             x = pool(x)
         
         # Final encoder block (no pooling)
@@ -220,8 +267,11 @@ class VideoFrag3Dv2(nn.Module):
         
         for i, block in enumerate(self.decoder_blocks):
             # Upsample (except first decoder layer)
-            if i > 0 and i - 1 < len(self.decoder_upsamples):
-                x = self.decoder_upsamples[i - 1](x)
+            if i > 0 and i - 1 < len(self.decoder_upsample_channels):
+                upsample_channels = self.decoder_upsample_channels[i - 1]
+                current_shape = x.shape[2:]  # T, H, W
+                upsample = self._create_adaptive_upsample(upsample_channels, current_shape)
+                x = upsample(x)
             
             # Add skip connection if available and shapes match
             if i < len(skip_features):

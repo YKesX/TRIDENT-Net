@@ -188,6 +188,7 @@ class CrossAttnFusion(FusionModule):
         zr: torch.Tensor,
         class_ids: Optional[torch.Tensor] = None,
         events: Optional[List[EventToken]] = None,
+        labels: Optional[Dict[str, torch.Tensor]] = None,
     ):
         """
         Forward pass through CrossAttnFusion.
@@ -198,6 +199,7 @@ class CrossAttnFusion(FusionModule):
             zr: R-branch features (B, 384)
             class_ids: Class IDs (B,) or precomputed embeddings (B, e_cls)
             events: List of events from all modalities
+            labels: Labels for loss computation (ignored in forward pass)
 
         Returns:
             tuple: Non-tracing: (z_fused, p_hit, p_kill, attn_maps, top_events)
@@ -205,6 +207,12 @@ class CrossAttnFusion(FusionModule):
         """
         B = zi.shape[0]
         device = zi.device
+        
+        # Ensure input tensors match model parameter dtype for mixed precision compatibility
+        model_dtype = next(self.parameters()).dtype
+        zi = zi.to(dtype=model_dtype)
+        zt = zt.to(dtype=model_dtype)
+        zr = zr.to(dtype=model_dtype)
 
         # Project modality features to common dimension
         zi_proj = self.i_proj(zi)  # (B, d_model)
@@ -217,11 +225,11 @@ class CrossAttnFusion(FusionModule):
                 class_emb = self.class_embedding(class_ids)  # (B, e_cls)
             else:
                 # Assume already an embedding of shape (B, e_cls)
-                class_emb = class_ids
+                class_emb = class_ids.to(dtype=model_dtype)
             zcls_proj = self.cls_proj(class_emb)  # (B, d_model)
         else:
             # Use zero embeddings if no class info provided
-            zcls_proj = torch.zeros(B, self.d_model, device=device)
+            zcls_proj = torch.zeros(B, self.d_model, device=device, dtype=model_dtype)
 
         # Stack modality features (I, T, R, Class)
         features = torch.stack([zi_proj, zt_proj, zr_proj, zcls_proj], dim=1)  # (B, 4, d_model)
